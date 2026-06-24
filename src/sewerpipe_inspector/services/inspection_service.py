@@ -82,6 +82,8 @@ class InspectionService:
         resolved_distance = distance_m
         if resolved_distance is None:
             resolved_distance = self._extract_distance(video_row, frame)
+        if resolved_distance is None:
+            raise ValueError("distance_m is required")
 
         try:
             return self.db.create_defect(
@@ -189,7 +191,9 @@ class InspectionService:
         for path in sorted(artifact_paths, key=lambda item: len(item.parts)):
             self.storage.remove_tree(path)
 
-    def generate_excel_report(self, report_id: int) -> Path:
+    def generate_excel_report(
+        self, report_id: int, report_path: Path | None = None
+    ) -> Path:
         context = self.db.get_report_context(report_id)
         report = self.db.get_report(report_id)
         pipe_info = self.db.get_pipe_information(report_id)
@@ -199,13 +203,14 @@ class InspectionService:
         if context is None or report is None:
             raise ValueError("Invalid report id")
 
-        report_path = self.storage.excel_report_path(
-            context["project_name"],
-            context["business_code"],
-            context["business_name"],
-            context["report_number"],
-            context["pipe_number"],
-        )
+        if report_path is None:
+            report_path = self.storage.excel_report_path(
+                context["project_name"],
+                context["business_code"],
+                context["business_name"],
+                context["report_number"],
+                context["pipe_number"],
+            )
 
         defects = self.db.list_defects(report_id)
         defect_payload: list[DefectReportRow] = [

@@ -112,7 +112,7 @@ class Defect:
     timestamp_ms: int
     image_path: str
     drive_direction: str
-    distance_m: Optional[float]
+    distance_m: float
     item_category: Optional[str]
     condition_item: Optional[str]
     defect_item: Optional[str]

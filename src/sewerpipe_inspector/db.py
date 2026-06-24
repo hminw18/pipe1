@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS report_defects (
     timestamp_ms INTEGER NOT NULL,
     image_path TEXT NOT NULL,
     drive_direction TEXT NOT NULL CHECK(drive_direction IN ('순주행', '역주행')),
-    distance_m REAL,
+    distance_m REAL NOT NULL,
     item_category TEXT,
     condition_item TEXT,
     defect_item TEXT,
@@ -255,6 +255,7 @@ class Database:
             },
         )
         self._ensure_nullable_defect_grade(conn)
+        self._ensure_required_defect_distance(conn)
         self._normalize_defect_item_columns(conn)
         self._ensure_unique_entity_numbers(conn)
         self._ensure_performance_indexes(conn)
@@ -403,6 +404,58 @@ class Database:
                 manhole_defect_depth_m,
                 memo,
                 created_at
+            FROM report_defects
+            """
+        )
+        conn.execute("DROP TABLE report_defects")
+        conn.execute("ALTER TABLE report_defects_new RENAME TO report_defects")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    def _ensure_required_defect_distance(self, conn: sqlite3.Connection) -> None:
+        table_info = conn.execute("PRAGMA table_info(report_defects)").fetchall()
+        distance_info = next(
+            (row for row in table_info if row["name"] == "distance_m"), None
+        )
+        if distance_info is None or int(distance_info["notnull"]) == 1:
+            return
+
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            """
+            CREATE TABLE report_defects_new (
+                id INTEGER PRIMARY KEY,
+                report_id INTEGER NOT NULL,
+                video_id INTEGER NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                image_path TEXT NOT NULL,
+                drive_direction TEXT NOT NULL CHECK(drive_direction IN ('순주행', '역주행')),
+                distance_m REAL NOT NULL,
+                item_category TEXT,
+                condition_item TEXT,
+                defect_item TEXT,
+                grade TEXT CHECK(grade IN ('대', '중', '소')),
+                quadrant TEXT,
+                manhole_defect_depth_m REAL,
+                memo TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
+                FOREIGN KEY(video_id) REFERENCES report_videos(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO report_defects_new(
+                id, report_id, video_id, timestamp_ms, image_path,
+                drive_direction, distance_m, item_category, condition_item,
+                defect_item, grade, quadrant, manhole_defect_depth_m, memo,
+                created_at
+            )
+            SELECT
+                id, report_id, video_id, timestamp_ms, image_path,
+                drive_direction, COALESCE(distance_m, 0.0), item_category,
+                condition_item, defect_item, grade, quadrant,
+                manhole_defect_depth_m, memo, created_at
             FROM report_defects
             """
         )
@@ -1185,7 +1238,7 @@ class Database:
         timestamp_ms: int,
         image_path: str,
         drive_direction: str,
-        distance_m: float | None,
+        distance_m: float,
         item_category: str | None,
         condition_item: str | None,
         defect_item: str | None,
@@ -1194,6 +1247,8 @@ class Database:
         manhole_defect_depth_m: float | None,
         memo: str | None,
     ) -> int:
+        if distance_m is None:
+            raise ValueError("distance_m is required")
         return self.execute(
             """
             INSERT INTO report_defects(

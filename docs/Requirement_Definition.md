@@ -394,7 +394,9 @@ Rules:
 - The defect list displays the computed score after `manhole_defect_depth_m`.
 - Defect scores are computed from `item_category + defect_item + grade`; a separate persisted database score field is not required unless later requested.
 - Defect capture remains report-video based: pause video, capture frame, enter defect fields, save.
+- `distance_m` is required for every Defect and must be enforced by the database schema.
 - `distance_m` should be populated from OCR/depth recognition where available, but must be editable or manually enterable if recognition fails.
+- Defect save must be blocked when `distance_m` is missing.
 - `manhole_defect_depth_m` is distinct from pipe driving distance.
 - Defect rows must store both `report_id` and `video_id`.
 
@@ -602,8 +604,10 @@ Output filename:
 
 - `{report_number}_InspectionVisualReport.pdf`
 
-PDF defect display scope:
+PDF defect caption display scope:
 
+- `timestamp_ms` displayed as `MM:SS`
+- `distance_m`
 - `condition_item`
 - `defect_item`
 - `grade`
@@ -613,7 +617,8 @@ Rules:
 - PDF does not need to display every newly added Report/Business/Pipe/Manhole field.
 - PDF still uses the pipe visual layout.
 - Defect placement should use `distance_m` where available.
-- Existing PDF defect captions must be replaced with the new limited caption scope: `condition_item`, `defect_item`, and `grade`.
+- Defect captions display `timestamp_ms`, `distance_m`, `condition_item`, `defect_item`, and `grade`.
+- The distance marker/arrow label may also display `distance_m` to clarify visual placement.
 
 ## 9. Keyboard Shortcuts
 
@@ -666,5 +671,5 @@ Grade shortcut mapping:
 - Actual Survey Information is edited and exported as a fixed table with two directional rows and one merged content row.
 - Export actions are disabled until required export fields are complete.
 - Excel output reflects Project, Business, Report, Pipe Information, Manhole, Actual Survey Information, and Defect fields.
-- PDF output includes at least condition item, defect item, and grade for defects.
+- PDF output includes timestamp, distance, condition item, defect item, and grade for defects.
 - Existing automated tests are updated or replaced to cover the new model.
