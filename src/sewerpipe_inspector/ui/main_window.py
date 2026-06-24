@@ -67,6 +67,8 @@ from sewerpipe_inspector.settings_service import load_settings, save_settings
 from sewerpipe_inspector.stop_detection import (
     DepthOcrStopDetectionConfig,
     DepthOcrStopSegmentDetector,
+    StopFrameCandidateDetectionConfig,
+    StopFrameCandidateDetector,
 )
 from sewerpipe_inspector.ui.dialogs import (
     AfterReportDialog,
@@ -79,6 +81,8 @@ from sewerpipe_inspector.ui.widgets import TimelineSlider
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_ID = Qt.ItemDataRole.UserRole + 1
+ROLE_STOP_ITEM_TYPE = Qt.ItemDataRole.UserRole + 20
+ROLE_STOP_TIMESTAMP_MS = Qt.ItemDataRole.UserRole + 21
 TABLE_ROW_COLOR = "#ffffff"
 TABLE_ALT_ROW_COLOR = "#f6f8fa"
 TABLE_LABEL_COLOR = "#e8edf5"
@@ -89,7 +93,7 @@ VIDEO_DISPLAY_WIDTH = 604
 VIDEO_DISPLAY_HEIGHT = 340
 STOP_SEGMENT_PANEL_DEFAULT_WIDTH = 137
 STOP_SEGMENT_PANEL_MIN_WIDTH = 42
-STOP_SEGMENT_PANEL_MAX_WIDTH = 240
+STOP_SEGMENT_PANEL_MAX_WIDTH = 420
 STOP_SEGMENT_PANEL_COMPACT_WIDTH = 88
 STOP_SEGMENT_PANEL_COLLAPSE_THRESHOLD = 24
 STOP_SEGMENT_RESIZE_HANDLE_WIDTH = 6
@@ -1722,6 +1726,7 @@ class MainWindow(QMainWindow):
 
         self.stop_segment_list = QListWidget(self)
         self.stop_segment_list.setObjectName("stopSegmentList")
+        self.stop_segment_list.setWordWrap(True)
         self.stop_segment_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.stop_segment_list.itemClicked.connect(self._seek_to_stop_segment_item)
         self.stop_segment_list.itemDoubleClicked.connect(self._seek_to_stop_segment_item)
@@ -4049,8 +4054,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "캡처", "현재 프레임이 없습니다")
             return
         self.stop_playback()
+        self._set_pending_capture_from_current_frame(self.timeline_slider.value())
+        self.video_label.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _set_pending_capture_from_current_frame(self, timestamp_ms: int) -> None:
+        if self.current_frame is None:
+            return
         self.pending_capture_frame = self.current_frame.copy()
-        self.pending_capture_timestamp_ms = self.timeline_slider.value()
+        self.pending_capture_timestamp_ms = timestamp_ms
         self._set_capture_preview_from_frame(self.pending_capture_frame)
         if self.current_video_id is not None:
             try:
@@ -4061,7 +4072,6 @@ class MainWindow(QMainWindow):
                     self.distance_input.setText(f"{distance:.3f}")
             except Exception:
                 self.logger.exception("Failed distance OCR on capture")
-        self.video_label.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def set_grade(self, grade: str) -> None:
         if not self.grade_combo.isEnabled():
@@ -4235,19 +4245,165 @@ class MainWindow(QMainWindow):
             duration = float(seg["duration"])
             distance = seg.get("distance_m")
             distance_text = "-" if distance is None else f"{float(distance):.1f} m"
+            candidates = seg.get("candidates", [])
+            candidate_count = len(candidates) if isinstance(candidates, list) else 0
             item = QListWidgetItem(
                 f"{idx:02d}  {format_short_timestamp(start_ms)}-{format_short_timestamp(end_ms)}\n"
-                f"     {distance_text} · {duration:.1f}s"
+                f"     {distance_text} · {duration:.1f}s · 후보 {candidate_count}"
             )
             item.setSizeHint(QSize(0, 46))
-            item.setData(Qt.ItemDataRole.UserRole, start_ms)
+            item.setData(ROLE_STOP_ITEM_TYPE, "segment")
+            item.setData(ROLE_STOP_TIMESTAMP_MS, start_ms)
             self.stop_segment_list.addItem(item)
+            if not isinstance(candidates, list):
+                continue
+            for candidate_idx, candidate in enumerate(candidates, start=1):
+                timestamp = float(candidate.get("timestamp", 0.0))
+                timestamp_ms = int(float(candidate.get("timestamp_ms", timestamp * 1000)))
+                candidate_item = QListWidgetItem(
+                    self._stop_candidate_debug_summary(
+                        candidate_idx,
+                        timestamp_ms,
+                        candidate,
+                    )
+                )
+                candidate_item.setToolTip(
+                    self._stop_candidate_debug_tooltip(candidate_idx, timestamp_ms, candidate)
+                )
+                candidate_item.setSizeHint(QSize(0, 74))
+                candidate_item.setData(ROLE_STOP_ITEM_TYPE, "candidate")
+                candidate_item.setData(ROLE_STOP_TIMESTAMP_MS, timestamp_ms)
+                self.stop_segment_list.addItem(candidate_item)
+
+    def _stop_candidate_value(
+        self, candidate: dict[str, object], key: str, default: float = 0.0
+    ) -> float:
+        value = candidate.get(key)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _stop_candidate_debug_summary(
+        self,
+        candidate_idx: int,
+        timestamp_ms: int,
+        candidate: dict[str, object],
+    ) -> str:
+        confidence = self._stop_candidate_value(candidate, "confidence")
+        score = self._stop_candidate_value(candidate, "score")
+        stability = self._stop_candidate_value(candidate, "stability_score")
+        pre_rotation = self._stop_candidate_value(candidate, "pre_rotation_strength")
+        post_rotation = self._stop_candidate_value(candidate, "post_rotation_strength")
+        post_translation = self._stop_candidate_value(
+            candidate, "post_translation_strength"
+        )
+        sharpness = self._stop_candidate_value(candidate, "sharpness_score")
+        duration = self._stop_candidate_value(candidate, "duration_score")
+        departure = self._stop_candidate_value(candidate, "departure_penalty")
+        edge = self._stop_candidate_value(candidate, "edge_penalty")
+        return (
+            f"   후보 {candidate_idx}  {format_short_timestamp(timestamp_ms)}"
+            f"  {confidence * 100:.0f}% · 점수 {score:.2f}\n"
+            f"      안정 {stability:.2f} · 전회 {pre_rotation:.2f}"
+            f" · 후회 {post_rotation:.2f} · 후전 {post_translation:.2f}\n"
+            f"      선명 {sharpness:.2f} · 지속 {duration:.2f}"
+            f" · 출발감 {departure:.2f} · 경계 {edge:.2f}"
+        )
+
+    def _stop_candidate_debug_tooltip(
+        self,
+        candidate_idx: int,
+        timestamp_ms: int,
+        candidate: dict[str, object],
+    ) -> str:
+        lines = [
+            f"후보 {candidate_idx}  {format_short_timestamp(timestamp_ms)}",
+            f"총점: {self._stop_candidate_value(candidate, 'score'):.4f}",
+            f"신뢰도: {self._stop_candidate_value(candidate, 'confidence'):.4f}",
+            "",
+            "정규화 구성요소",
+            f"안정: {self._stop_candidate_value(candidate, 'stability_score'):.4f}",
+            f"전회전: {self._stop_candidate_value(candidate, 'pre_rotation_strength'):.4f}",
+            f"후회전: {self._stop_candidate_value(candidate, 'post_rotation_strength'):.4f}",
+            f"후전진: {self._stop_candidate_value(candidate, 'post_translation_strength'):.4f}",
+            f"선명: {self._stop_candidate_value(candidate, 'sharpness_score'):.4f}",
+            f"지속: {self._stop_candidate_value(candidate, 'duration_score'):.4f}",
+            f"출발감점: {self._stop_candidate_value(candidate, 'departure_penalty'):.4f}",
+            f"경계감점: {self._stop_candidate_value(candidate, 'edge_penalty'):.4f}",
+            "",
+            "원시값",
+            f"평균 motion: {self._stop_candidate_value(candidate, 'motion_score'):.4f}",
+            f"smoothed 평균 motion: {self._stop_candidate_value(candidate, 'smoothed_motion_score'):.4f}",
+            f"선택 프레임 smoothed motion: {self._stop_candidate_value(candidate, 'best_smoothed_motion'):.4f}",
+            f"전회전 raw: {self._stop_candidate_value(candidate, 'pre_rotation_score'):.4f}",
+            f"전회전 peak: {self._stop_candidate_value(candidate, 'pre_rotation_peak'):.4f}",
+            f"전회전 energy: {self._stop_candidate_value(candidate, 'pre_rotation_energy'):.4f}",
+            f"전회전 energy score: {self._stop_candidate_value(candidate, 'pre_rotation_energy_score'):.4f}",
+            f"후회전 raw: {self._stop_candidate_value(candidate, 'post_rotation_score'):.4f}",
+            f"후회전 peak: {self._stop_candidate_value(candidate, 'post_rotation_peak'):.4f}",
+            f"후회전 energy: {self._stop_candidate_value(candidate, 'post_rotation_energy'):.4f}",
+            f"후회전 energy score: {self._stop_candidate_value(candidate, 'post_rotation_energy_score'):.4f}",
+            f"후전진 raw: {self._stop_candidate_value(candidate, 'post_translation_score'):.4f}",
+            f"후전진 peak: {self._stop_candidate_value(candidate, 'post_translation_peak'):.4f}",
+            f"후전진 energy: {self._stop_candidate_value(candidate, 'post_translation_energy'):.4f}",
+            f"후전진 energy score: {self._stop_candidate_value(candidate, 'post_translation_energy_score'):.4f}",
+            f"선명 raw: {self._stop_candidate_value(candidate, 'sharpness'):.4f}",
+            f"안정 threshold: {self._stop_candidate_value(candidate, 'stable_threshold'):.4f}",
+            f"이동 threshold: {self._stop_candidate_value(candidate, 'moving_threshold'):.4f}",
+            "",
+            "총점 기여도",
+        ]
+        score_components = candidate.get("score_components")
+        if isinstance(score_components, dict):
+            for key, label in (
+                ("duration", "지속"),
+                ("pre_rotation", "전회전"),
+                ("post_rotation", "후회전"),
+                ("sharpness", "선명"),
+                ("stability", "안정"),
+                ("departure_penalty", "출발감점"),
+                ("edge_penalty", "경계감점"),
+            ):
+                lines.append(
+                    f"{label}: {self._stop_candidate_value(score_components, key):+.4f}"
+                )
+        else:
+            lines.append("(없음)")
+        lines.extend(["", "신뢰도 기여도"])
+        confidence_components = candidate.get("confidence_components")
+        if isinstance(confidence_components, dict):
+            for key, label in (
+                ("stability", "안정"),
+                ("pre_rotation", "전회전"),
+                ("post_rotation", "후회전"),
+                ("sharpness", "선명"),
+                ("duration", "지속"),
+                ("departure_penalty", "출발감점"),
+                ("edge_penalty", "경계감점"),
+            ):
+                lines.append(
+                    f"{label}: {self._stop_candidate_value(confidence_components, key):+.4f}"
+                )
+        else:
+            lines.append("(없음)")
+        return "\n".join(lines)
 
     def _seek_to_stop_segment_item(self, item: QListWidgetItem) -> None:
-        timestamp_ms = item.data(Qt.ItemDataRole.UserRole)
+        timestamp_ms = item.data(ROLE_STOP_TIMESTAMP_MS)
         if timestamp_ms is None:
             return
-        self._seek_ms(int(timestamp_ms))
+        if item.data(ROLE_STOP_ITEM_TYPE) == "candidate":
+            self._preview_stop_frame_candidate(int(timestamp_ms))
+        else:
+            self._seek_ms(int(timestamp_ms))
+
+    def _preview_stop_frame_candidate(self, timestamp_ms: int) -> None:
+        self.stop_playback()
+        self._seek_ms(timestamp_ms)
+        if self.current_frame is None:
+            return
+        self._set_pending_capture_from_current_frame(timestamp_ms)
 
     def _refresh_timeline_markers(self, defect_rows) -> None:
         markers: list[tuple[int, str]] = []
@@ -4338,7 +4494,7 @@ class MainWindow(QMainWindow):
             )
         )
         try:
-            self.stop_segments = detector.analyze(
+            stop_segments = detector.analyze(
                 str(self.current_video_path),
                 self.current_depth_roi,
             )
@@ -4346,11 +4502,41 @@ class MainWindow(QMainWindow):
             self.logger.exception("Stop segment detection failed")
             QMessageBox.critical(self, "의심구간 오류", str(exc))
             return
+        candidate_error: Exception | None = None
+        candidate_detector = StopFrameCandidateDetector(
+            StopFrameCandidateDetectionConfig(
+                fps=5.0,
+                max_candidates_per_segment=3,
+                min_stable_duration=0.6,
+                min_candidate_gap=1.2,
+            )
+        )
+        try:
+            self.stop_segments = candidate_detector.analyze(
+                str(self.current_video_path),
+                stop_segments,
+            )
+        except Exception as exc:
+            self.logger.exception("Stop frame candidate detection failed")
+            candidate_error = exc
+            self.stop_segments = [dict(segment, candidates=[]) for segment in stop_segments]
         self.refresh_defects()
+        candidate_count = sum(
+            len(seg.get("candidates", []))
+            for seg in self.stop_segments
+            if isinstance(seg.get("candidates", []), list)
+        )
+        if candidate_error is not None:
+            QMessageBox.warning(
+                self,
+                "의심구간",
+                f"의심구간 {len(self.stop_segments)}개를 탐지했지만 후보 프레임 분석은 실패했습니다.\n{candidate_error}",
+            )
+            return
         QMessageBox.information(
             self,
             "의심구간",
-            f"거리 OCR 기반으로 의심구간 {len(self.stop_segments)}개를 탐지했습니다.",
+            f"의심구간 {len(self.stop_segments)}개와 후보 프레임 {candidate_count}개를 탐지했습니다.",
         )
 
     def generate_excel_report(self) -> None:
