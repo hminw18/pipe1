@@ -1501,9 +1501,14 @@ class MainWindow(QMainWindow):
         self.project_nav_group = self._wrap_nav_group("프로젝트", self.project_nav)
         self.project_nav_group.set_title_clickable(True)
         self.project_nav_group.title_clicked.connect(self._show_project_root_from_nav)
+        self.business_nav_group = self._wrap_nav_group("사업", self.business_nav)
+        self.business_nav_group.title_clicked.connect(self._show_business_root_from_nav)
+        self.report_nav_group = self._wrap_nav_group("보고서", self.report_nav)
+        self.report_nav_group.title_clicked.connect(self._show_report_root_from_nav)
+        self._update_nav_title_clickable_states()
         layout.addWidget(self.project_nav_group, 1)
-        layout.addWidget(self._wrap_nav_group("사업", self.business_nav), 1)
-        layout.addWidget(self._wrap_nav_group("보고서", self.report_nav), 1)
+        layout.addWidget(self.business_nav_group, 1)
+        layout.addWidget(self.report_nav_group, 1)
         self.workspace_button = QPushButton("작업 폴더 변경", self)
         self.workspace_button.setObjectName("workspaceButton")
         self.workspace_button.clicked.connect(self.change_workspace_directory)
@@ -2001,8 +2006,6 @@ class MainWindow(QMainWindow):
                     ("선택 복제", self.duplicate_selected_business_from_right, "secondaryButton"),
                     ("선택 수정", self.edit_selected_business_from_right, "secondaryButton"),
                     ("선택 삭제", self.delete_selected_business_from_right, "dangerButton"),
-                    ("프로젝트 복제", self.duplicate_current_project_from_right, "secondaryButton"),
-                    ("프로젝트 수정", self.edit_current_project_from_right, "secondaryButton"),
                 ],
             )
         )
@@ -2034,8 +2037,6 @@ class MainWindow(QMainWindow):
                     ("선택 복제", self.duplicate_selected_report_from_right, "secondaryButton"),
                     ("선택 수정", self.edit_selected_report_from_right, "secondaryButton"),
                     ("선택 삭제", self.delete_selected_report_from_right, "dangerButton"),
-                    ("사업 복제", self.duplicate_current_business_from_right, "secondaryButton"),
-                    ("사업 수정", self.edit_current_business_from_right, "secondaryButton"),
                 ],
             )
         )
@@ -2876,6 +2877,7 @@ class MainWindow(QMainWindow):
         self.current_business_id = None
         self.current_report_id = None
         self.current_version_group_id = None
+        self._update_nav_title_clickable_states()
         self._set_page_header(
             "프로젝트 목록",
             "프로젝트별 사업과 보고서를 관리합니다.",
@@ -2908,6 +2910,7 @@ class MainWindow(QMainWindow):
         self.current_business_id = None
         self.current_report_id = None
         self.current_version_group_id = None
+        self._update_nav_title_clickable_states()
         self._set_page_header(
             f"{project['project_name']} - 사업 목록",
             "선택한 프로젝트의 사업을 생성하고 관리합니다.",
@@ -2941,6 +2944,7 @@ class MainWindow(QMainWindow):
         self.current_business_id = business_id
         self.current_report_id = None
         self.current_version_group_id = None
+        self._update_nav_title_clickable_states()
         project = self.db.get_project(self.current_project_id)
         project_name = project["project_name"] if project is not None else "프로젝트"
         self._set_page_header(
@@ -3609,6 +3613,46 @@ class MainWindow(QMainWindow):
         self._reset_report_workspace(flush_pending=False)
         self._show_project_list()
 
+    def _show_business_root_from_nav(self) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
+        if self.current_project_id is None:
+            return
+        project_id = self.current_project_id
+        self._set_navigation_blocked(True)
+        try:
+            self.business_nav.clearSelection()
+            self.business_nav.setCurrentRow(-1)
+            self.report_nav.clear()
+        finally:
+            self._set_navigation_blocked(False)
+        self._reset_report_workspace(flush_pending=False)
+        self._show_business_list(project_id)
+
+    def _show_report_root_from_nav(self) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
+        if self.current_business_id is None:
+            return
+        business_id = self.current_business_id
+        self._set_navigation_blocked(True)
+        try:
+            self.report_nav.clearSelection()
+            self.report_nav.setCurrentRow(-1)
+        finally:
+            self._set_navigation_blocked(False)
+        self._reset_report_workspace(flush_pending=False)
+        self._show_report_list(business_id)
+
+    def _update_nav_title_clickable_states(self) -> None:
+        if not hasattr(self, "project_nav_group"):
+            return
+        self.project_nav_group.set_title_clickable(True)
+        self.business_nav_group.set_title_clickable(self.current_project_id is not None)
+        self.report_nav_group.set_title_clickable(self.current_business_id is not None)
+
     def _business_selection_changed(self) -> None:
         if self._updating_navigation:
             return
@@ -3791,6 +3835,7 @@ class MainWindow(QMainWindow):
         self.current_business_id = int(context["business_id"])
         self.current_version_group_id = int(report["version_group_id"])
         version_name = report["version_name"] or f"v{report['version_number']}"
+        self._update_nav_title_clickable_states()
         self._set_page_header(
             f"보고서 {report['report_number']} / {report['pipe_number']} · {version_name}",
             "선택한 버전 작업본의 보고서 정보, 영상, 결함 기록을 자동 저장합니다.",
