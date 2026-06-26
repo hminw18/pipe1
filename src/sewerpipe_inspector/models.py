@@ -48,6 +48,10 @@ class Report:
     pipe_type: Optional[str]
     category: Optional[str]
     specification: Optional[str]
+    version_group_id: int
+    version_number: int
+    version_name: Optional[str]
+    updated_at: datetime
     created_at: datetime
 
 

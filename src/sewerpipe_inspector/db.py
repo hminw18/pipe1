@@ -4,8 +4,14 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover - fallback for stripped Python builds.
+    ZoneInfo = None
 
 
 REPORT_FIELDS = [
@@ -30,6 +36,11 @@ REPORT_FIELDS = [
     "pipe_type",
     "category",
     "specification",
+]
+
+REPORT_IDENTITY_FIELDS = ["report_number", "pipe_number"]
+REPORT_VERSION_FIELDS = [
+    field for field in REPORT_FIELDS if field not in REPORT_IDENTITY_FIELDS
 ]
 
 MANHOLE_FIELDS = [
@@ -67,6 +78,16 @@ DEFECT_FIELDS = [
     "manhole_defect_depth_m",
     "memo",
 ]
+
+KST = (
+    ZoneInfo("Asia/Seoul")
+    if ZoneInfo is not None
+    else timezone(timedelta(hours=9))
+)
+
+
+def _kst_timestamp() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -112,6 +133,10 @@ CREATE TABLE IF NOT EXISTS reports (
     pipe_type TEXT,
     category TEXT,
     specification TEXT,
+    version_group_id INTEGER,
+    version_number INTEGER NOT NULL DEFAULT 1,
+    version_name TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(business_id) REFERENCES businesses(id) ON DELETE CASCADE
 );
@@ -291,6 +316,7 @@ class Database:
             self._run_migrations_on_connection(conn)
 
     def _run_migrations_on_connection(self, conn: sqlite3.Connection) -> None:
+        self._ensure_report_version_columns(conn)
         self._ensure_columns(
             conn,
             "report_defects",
@@ -310,12 +336,69 @@ class Database:
         self._ensure_unique_entity_numbers(conn)
         self._ensure_performance_indexes(conn)
 
+    def _ensure_report_version_columns(self, conn: sqlite3.Connection) -> None:
+        self._ensure_columns(
+            conn,
+            "reports",
+            {
+                "survey_purpose": "TEXT",
+                "survey_date": "TEXT",
+                "buried_years": "TEXT",
+                "inspector": "TEXT",
+                "contractor": "TEXT",
+                "treatment_area": "TEXT",
+                "drainage_area": "TEXT",
+                "drainage_district": "TEXT",
+                "drain_type": "TEXT",
+                "drain_system": "TEXT",
+                "province": "TEXT",
+                "city_county": "TEXT",
+                "town": "TEXT",
+                "village": "TEXT",
+                "lot_number": "TEXT",
+                "road_address": "TEXT",
+                "pipe_type": "TEXT",
+                "category": "TEXT",
+                "specification": "TEXT",
+                "created_at": "DATETIME",
+            },
+        )
+        self._ensure_columns(
+            conn,
+            "reports",
+            {
+                "version_group_id": "INTEGER",
+                "version_number": "INTEGER NOT NULL DEFAULT 1",
+                "version_name": "TEXT",
+                "updated_at": "DATETIME",
+            },
+        )
+        now = _kst_timestamp()
+        conn.execute(
+            """
+            UPDATE reports
+            SET
+                version_group_id = COALESCE(version_group_id, id),
+                version_number = COALESCE(version_number, 1),
+                version_name = COALESCE(
+                    NULLIF(TRIM(version_name), ''),
+                    'v' || COALESCE(version_number, 1)
+                ),
+                created_at = COALESCE(created_at, CURRENT_TIMESTAMP),
+                updated_at = COALESCE(updated_at, ?)
+            WHERE version_group_id IS NULL
+               OR version_number IS NULL
+               OR version_name IS NULL
+               OR TRIM(version_name) = ''
+               OR created_at IS NULL
+               OR updated_at IS NULL
+            """,
+            (now,),
+        )
+
     def _ensure_unique_entity_numbers(self, conn: sqlite3.Connection) -> None:
         self._deduplicate_scoped_text(
             conn, "businesses", "project_id", "business_code"
-        )
-        self._deduplicate_scoped_text(
-            conn, "reports", "business_id", "report_number"
         )
         conn.execute(
             """
@@ -324,13 +407,61 @@ class Database:
             ON businesses(project_id, business_code)
             """
         )
+        conn.execute("DROP INDEX IF EXISTS ux_reports_business_report_number")
+        self._deduplicate_report_groups(conn)
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
-                ux_reports_business_report_number
-            ON reports(business_id, report_number)
+                ux_reports_version_group_number
+            ON reports(version_group_id, version_number)
             """
         )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                ux_reports_business_group_report_number
+            ON reports(business_id, report_number)
+            WHERE id = version_group_id
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_reports_business_group
+            ON reports(business_id, version_group_id, version_number)
+            """
+        )
+
+    def _deduplicate_report_groups(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, business_id, report_number, version_group_id
+            FROM reports
+            WHERE id = COALESCE(version_group_id, id)
+            ORDER BY business_id, id
+            """
+        ).fetchall()
+        seen: dict[int, set[str]] = {}
+        for row in rows:
+            business_id = int(row["business_id"])
+            value = str(row["report_number"])
+            business_values = seen.setdefault(business_id, set())
+            if value not in business_values:
+                business_values.add(value)
+                continue
+            unique_value = self._next_unique_text_in_scope(
+                conn,
+                "reports",
+                "report_number",
+                value,
+                "business_id = ? AND version_group_id != ?",
+                (business_id, int(row["version_group_id"])),
+                reserved=business_values,
+            )
+            conn.execute(
+                "UPDATE reports SET report_number = ? WHERE version_group_id = ?",
+                (unique_value, int(row["version_group_id"])),
+            )
+            business_values.add(unique_value)
 
     def _ensure_performance_indexes(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -594,6 +725,12 @@ class Database:
             cur = conn.execute(query, params)
             return int(cur.lastrowid or 0)
 
+    def _touch_report_version(self, conn: sqlite3.Connection, report_id: int) -> None:
+        conn.execute(
+            "UPDATE reports SET updated_at = ? WHERE id = ?",
+            (_kst_timestamp(), report_id),
+        )
+
     def create_project(self, project_name: str) -> int:
         return self.execute(
             "INSERT INTO inspection_projects(project_name) VALUES (?)",
@@ -734,12 +871,19 @@ class Database:
             self._require_unique_report_number(conn, business_id, report_number)
             cur = conn.execute(
                 """
-                INSERT INTO reports(business_id, report_number, pipe_number)
-                VALUES (?, ?, ?)
+                INSERT INTO reports(
+                    business_id, report_number, pipe_number,
+                    version_number, version_name, updated_at
+                )
+                VALUES (?, ?, ?, 1, 'v1', ?)
                 """,
-                (business_id, report_number, pipe_number),
+                (business_id, report_number, pipe_number, _kst_timestamp()),
             )
             report_id = int(cur.lastrowid)
+            conn.execute(
+                "UPDATE reports SET version_group_id = ? WHERE id = ?",
+                (report_id, report_id),
+            )
             self._ensure_report_children(conn, report_id)
             return report_id
 
@@ -796,7 +940,8 @@ class Database:
     def update_report(self, report_id: int, payload: dict[str, object]) -> None:
         with self.transaction() as conn:
             report = conn.execute(
-                "SELECT business_id FROM reports WHERE id = ?", (report_id,)
+                "SELECT * FROM reports WHERE id = ?",
+                (report_id,),
             ).fetchone()
             if report is None:
                 raise ValueError("보고서를 찾을 수 없습니다")
@@ -805,29 +950,163 @@ class Database:
                 conn,
                 int(report["business_id"]),
                 "" if report_number is None else str(report_number),
-                report_id,
+                int(report["version_group_id"]),
             )
-            values = [payload.get(field) for field in REPORT_FIELDS]
-            assignments = ", ".join(f"{field} = ?" for field in REPORT_FIELDS)
+            identity_values = [payload.get(field) for field in REPORT_IDENTITY_FIELDS]
+            now = _kst_timestamp()
+            if any(
+                report[field] != payload.get(field)
+                for field in REPORT_IDENTITY_FIELDS
+            ):
+                identity_assignments = ", ".join(
+                    f"{field} = ?" for field in REPORT_IDENTITY_FIELDS
+                )
+                conn.execute(
+                    f"""
+                    UPDATE reports
+                    SET {identity_assignments}, updated_at = ?
+                    WHERE version_group_id = ?
+                    """,
+                    tuple(identity_values + [now, int(report["version_group_id"])]),
+                )
+            values = [payload.get(field) for field in REPORT_VERSION_FIELDS]
+            assignments = ", ".join(f"{field} = ?" for field in REPORT_VERSION_FIELDS)
             conn.execute(
-                f"UPDATE reports SET {assignments} WHERE id = ?",
-                tuple(values + [report_id]),
+                f"""
+                UPDATE reports
+                SET {assignments}, updated_at = ?
+                WHERE id = ?
+                """,
+                tuple(values + [now, report_id]),
             )
 
     def delete_report(self, report_id: int) -> None:
-        self.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+        with self.transaction() as conn:
+            report = conn.execute(
+                "SELECT version_group_id FROM reports WHERE id = ?",
+                (report_id,),
+            ).fetchone()
+            if report is None:
+                return
+            conn.execute(
+                "DELETE FROM reports WHERE version_group_id = ?",
+                (int(report["version_group_id"]),),
+            )
+
+    def delete_report_version(self, report_id: int) -> int:
+        with self.transaction() as conn:
+            report = conn.execute(
+                "SELECT id, version_group_id FROM reports WHERE id = ?",
+                (report_id,),
+            ).fetchone()
+            if report is None:
+                raise ValueError("보고서 버전을 찾을 수 없습니다")
+            version_group_id = int(report["version_group_id"])
+            versions = conn.execute(
+                """
+                SELECT id
+                FROM reports
+                WHERE version_group_id = ?
+                ORDER BY version_number ASC, id ASC
+                """,
+                (version_group_id,),
+            ).fetchall()
+            if len(versions) <= 1:
+                raise ValueError(
+                    "마지막 버전은 삭제할 수 없습니다. 보고서 삭제를 사용하세요"
+                )
+
+            remaining_ids = [
+                int(version["id"])
+                for version in versions
+                if int(version["id"]) != report_id
+            ]
+            if report_id == version_group_id:
+                new_version_group_id = remaining_ids[0]
+                conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+                conn.execute(
+                    """
+                    UPDATE reports
+                    SET version_group_id = ?
+                    WHERE version_group_id = ?
+                    """,
+                    (new_version_group_id, version_group_id),
+                )
+                version_group_id = new_version_group_id
+            else:
+                conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+
+            latest = conn.execute(
+                """
+                SELECT id
+                FROM reports
+                WHERE version_group_id = ?
+                ORDER BY version_number DESC, id DESC
+                LIMIT 1
+                """,
+                (version_group_id,),
+            ).fetchone()
+            if latest is None:
+                raise RuntimeError("삭제 후 선택할 보고서 버전을 찾을 수 없습니다")
+            return int(latest["id"])
 
     def get_report(self, report_id: int) -> Optional[sqlite3.Row]:
+        row = self.fetchone("SELECT * FROM reports WHERE id = ?", (report_id,))
+        if row is None:
+            return None
         self.ensure_report_children(report_id)
         return self.fetchone("SELECT * FROM reports WHERE id = ?", (report_id,))
 
     def list_reports(self, business_id: int) -> list[sqlite3.Row]:
         return self.fetchall(
-            "SELECT * FROM reports WHERE business_id = ? ORDER BY id DESC",
+            """
+            SELECT latest.*
+            FROM reports AS latest
+            JOIN (
+                SELECT version_group_id, MAX(version_number) AS max_version_number
+                FROM reports
+                WHERE business_id = ?
+                GROUP BY version_group_id
+            ) grouped
+                ON grouped.version_group_id = latest.version_group_id
+               AND grouped.max_version_number = latest.version_number
+            ORDER BY latest.id DESC
+            """,
             (business_id,),
         )
 
     def list_reports_with_counts(self, business_id: int) -> list[sqlite3.Row]:
+        return self.fetchall(
+            """
+            SELECT
+                reports.*,
+                report_videos.id AS video_id,
+                pipe_information.length_m,
+                pipe_information.total_drive_distance_m,
+                pipe_information.is_completed,
+                COUNT(DISTINCT report_defects.id) AS defect_count,
+                COUNT(DISTINCT all_versions.id) AS version_count
+            FROM reports
+            JOIN (
+                SELECT version_group_id, MAX(version_number) AS max_version_number
+                FROM reports
+                WHERE business_id = ?
+                GROUP BY version_group_id
+            ) grouped
+                ON grouped.version_group_id = reports.version_group_id
+               AND grouped.max_version_number = reports.version_number
+            LEFT JOIN reports AS all_versions
+                ON all_versions.version_group_id = reports.version_group_id
+            LEFT JOIN report_videos ON report_videos.report_id = reports.id
+            LEFT JOIN pipe_information ON pipe_information.report_id = reports.id
+            LEFT JOIN report_defects ON report_defects.report_id = reports.id
+            GROUP BY reports.id
+            ORDER BY reports.id DESC
+            """,
+            (business_id,),
+        )
+
+    def list_report_versions(self, version_group_id: int) -> list[sqlite3.Row]:
         return self.fetchall(
             """
             SELECT
@@ -841,11 +1120,23 @@ class Database:
             LEFT JOIN report_videos ON report_videos.report_id = reports.id
             LEFT JOIN pipe_information ON pipe_information.report_id = reports.id
             LEFT JOIN report_defects ON report_defects.report_id = reports.id
-            WHERE reports.business_id = ?
+            WHERE reports.version_group_id = ?
             GROUP BY reports.id
-            ORDER BY reports.id DESC
+            ORDER BY reports.version_number ASC, reports.id ASC
             """,
-            (business_id,),
+            (version_group_id,),
+        )
+
+    def get_latest_report_version(self, version_group_id: int) -> Optional[sqlite3.Row]:
+        return self.fetchone(
+            """
+            SELECT *
+            FROM reports
+            WHERE version_group_id = ?
+            ORDER BY version_number DESC, id DESC
+            LIMIT 1
+            """,
+            (version_group_id,),
         )
 
     def list_report_contexts(self) -> list[sqlite3.Row]:
@@ -961,17 +1252,19 @@ class Database:
         conn: sqlite3.Connection,
         business_id: int,
         report_number: str,
-        exclude_id: int | None = None,
+        exclude_version_group_id: int | None = None,
     ) -> bool:
-        return self._scoped_text_exists(
-            conn,
-            "reports",
-            "report_number",
-            report_number,
-            "business_id = ?",
-            (business_id,),
-            exclude_id,
-        )
+        sql = """
+            SELECT 1
+            FROM reports
+            WHERE business_id = ? AND report_number = ?
+        """
+        params: list[object] = [business_id, report_number]
+        if exclude_version_group_id is not None:
+            sql += " AND version_group_id != ?"
+            params.append(exclude_version_group_id)
+        sql += " LIMIT 1"
+        return conn.execute(sql, tuple(params)).fetchone() is not None
 
     def _require_unique_business_code(
         self,
@@ -990,11 +1283,13 @@ class Database:
         conn: sqlite3.Connection,
         business_id: int,
         report_number: str,
-        exclude_id: int | None = None,
+        exclude_version_group_id: int | None = None,
     ) -> None:
         if not report_number:
             raise ValueError("보고서번호를 입력하세요")
-        if self._report_number_exists(conn, business_id, report_number, exclude_id):
+        if self._report_number_exists(
+            conn, business_id, report_number, exclude_version_group_id
+        ):
             raise ValueError("같은 사업 안에 같은 보고서번호가 이미 있습니다")
 
     def _unique_business_copy_code(
@@ -1082,7 +1377,19 @@ class Database:
         )
         new_business_id = int(cur.lastrowid)
         reports = conn.execute(
-            "SELECT id FROM reports WHERE business_id = ? ORDER BY id ASC",
+            """
+            SELECT latest.id
+            FROM reports AS latest
+            JOIN (
+                SELECT version_group_id, MAX(version_number) AS max_version_number
+                FROM reports
+                WHERE business_id = ?
+                GROUP BY version_group_id
+            ) grouped
+                ON grouped.version_group_id = latest.version_group_id
+               AND grouped.max_version_number = latest.version_number
+            ORDER BY latest.id ASC
+            """,
             (business_id,),
         ).fetchall()
         for report in reports:
@@ -1095,13 +1402,69 @@ class Database:
         with self.transaction() as conn:
             return self._duplicate_report(conn, report_id, target_business_id)
 
+    def create_report_version_from_latest(self, version_group_id: int) -> int:
+        with self.transaction() as conn:
+            latest = conn.execute(
+                """
+                SELECT *
+                FROM reports
+                WHERE version_group_id = ?
+                ORDER BY version_number DESC, id DESC
+                LIMIT 1
+                """,
+                (version_group_id,),
+            ).fetchone()
+            if latest is None:
+                raise ValueError("보고서 버전을 찾을 수 없습니다")
+
+            next_version_number = int(latest["version_number"]) + 1
+            columns = [
+                "business_id",
+                *REPORT_FIELDS,
+                "version_group_id",
+                "version_number",
+                "version_name",
+                "updated_at",
+            ]
+            placeholders = ", ".join("?" for _ in columns)
+            now = _kst_timestamp()
+            cur = conn.execute(
+                f"INSERT INTO reports({', '.join(columns)}) VALUES ({placeholders})",
+                tuple(
+                    [latest["business_id"]]
+                    + [latest[field] for field in REPORT_FIELDS]
+                    + [
+                        latest["version_group_id"],
+                        next_version_number,
+                        f"v{next_version_number}",
+                        now,
+                    ]
+                ),
+            )
+            new_report_id = int(cur.lastrowid)
+            self._ensure_report_children(conn, new_report_id)
+            self._copy_report_inputs(conn, int(latest["id"]), new_report_id)
+            new_video_id = self._copy_report_video(
+                conn,
+                int(latest["id"]),
+                new_report_id,
+            )
+            if new_video_id is not None:
+                self._copy_report_defects(
+                    conn, int(latest["id"]), new_report_id, new_video_id
+                )
+            return new_report_id
+
     def _duplicate_report(
         self,
         conn: sqlite3.Connection,
         report_id: int,
         target_business_id: int | None = None,
     ) -> int:
-        report = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+        report = conn.execute(
+            "SELECT * FROM reports WHERE id = ?",
+            (report_id,),
+        ).fetchone()
         if report is None:
             raise ValueError("보고서를 찾을 수 없습니다")
         business_id = int(target_business_id or report["business_id"])
@@ -1111,15 +1474,35 @@ class Database:
             business_id,
             self._copy_text(payload["report_number"], "보고서"),
         )
-        columns = ["business_id"] + REPORT_FIELDS
+        columns = [
+            "business_id",
+            *REPORT_FIELDS,
+            "version_number",
+            "version_name",
+            "updated_at",
+        ]
         placeholders = ", ".join("?" for _ in columns)
+        now = _kst_timestamp()
         cur = conn.execute(
             f"INSERT INTO reports({', '.join(columns)}) VALUES ({placeholders})",
-            tuple([business_id] + [payload[field] for field in REPORT_FIELDS]),
+            tuple(
+                [business_id]
+                + [payload[field] for field in REPORT_FIELDS]
+                + [1, "v1", now]
+            ),
         )
         new_report_id = int(cur.lastrowid)
+        conn.execute(
+            "UPDATE reports SET version_group_id = ? WHERE id = ?",
+            (new_report_id, new_report_id),
+        )
         self._ensure_report_children(conn, new_report_id)
+        self._copy_report_inputs(conn, report_id, new_report_id)
+        return new_report_id
 
+    def _copy_report_inputs(
+        self, conn: sqlite3.Connection, report_id: int, new_report_id: int
+    ) -> None:
         for role in ("upstream", "downstream"):
             manhole = conn.execute(
                 "SELECT * FROM manholes WHERE report_id = ? AND role = ?",
@@ -1165,7 +1548,79 @@ class Database:
                 f"UPDATE actual_survey_information SET {assignments} WHERE report_id = ?",
                 tuple(values + [new_report_id]),
             )
-        return new_report_id
+
+    def _copy_report_video(
+        self, conn: sqlite3.Connection, report_id: int, new_report_id: int
+    ) -> int | None:
+        video = conn.execute(
+            "SELECT * FROM report_videos WHERE report_id = ?", (report_id,)
+        ).fetchone()
+        if video is None:
+            return None
+        cur = conn.execute(
+            """
+            INSERT INTO report_videos(
+                report_id, file_path, duration, recorded_date, scan_direction,
+                depth_roi_x, depth_roi_y, depth_roi_w, depth_roi_h
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_report_id,
+                video["file_path"],
+                video["duration"],
+                video["recorded_date"],
+                video["scan_direction"],
+                video["depth_roi_x"],
+                video["depth_roi_y"],
+                video["depth_roi_w"],
+                video["depth_roi_h"],
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def _copy_report_defects(
+        self,
+        conn: sqlite3.Connection,
+        report_id: int,
+        new_report_id: int,
+        new_video_id: int,
+    ) -> None:
+        defects = conn.execute(
+            """
+            SELECT *
+            FROM report_defects
+            WHERE report_id = ?
+            ORDER BY timestamp_ms ASC, id ASC
+            """,
+            (report_id,),
+        ).fetchall()
+        for defect in defects:
+            conn.execute(
+                """
+                INSERT INTO report_defects(
+                    report_id, video_id, timestamp_ms, image_path, drive_direction,
+                    distance_m, item_category, condition_item, defect_item, grade,
+                    quadrant, manhole_defect_depth_m, memo
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_report_id,
+                    new_video_id,
+                    defect["timestamp_ms"],
+                    defect["image_path"],
+                    defect["drive_direction"],
+                    defect["distance_m"],
+                    defect["item_category"],
+                    defect["condition_item"],
+                    defect["defect_item"],
+                    defect["grade"],
+                    defect["quadrant"],
+                    defect["manhole_defect_depth_m"],
+                    defect["memo"],
+                ),
+            )
 
     def update_manhole(
         self, report_id: int, role: str, payload: dict[str, object]
@@ -1173,10 +1628,12 @@ class Database:
         self.ensure_report_children(report_id)
         values = [payload.get(field) for field in MANHOLE_FIELDS]
         assignments = ", ".join(f"{field} = ?" for field in MANHOLE_FIELDS)
-        self.execute(
-            f"UPDATE manholes SET {assignments} WHERE report_id = ? AND role = ?",
-            tuple(values + [report_id, role]),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                f"UPDATE manholes SET {assignments} WHERE report_id = ? AND role = ?",
+                tuple(values + [report_id, role]),
+            )
+            self._touch_report_version(conn, report_id)
 
     def get_manhole(self, report_id: int, role: str) -> Optional[sqlite3.Row]:
         self.ensure_report_children(report_id)
@@ -1195,21 +1652,23 @@ class Database:
         is_completed, undriven = self.compute_pipe_completion(
             length_m, total_drive_distance_m
         )
-        self.execute(
-            """
-            UPDATE pipe_information
-            SET length_m = ?, total_drive_distance_m = ?,
-                is_completed = ?, undriven_distance_m = ?
-            WHERE report_id = ?
-            """,
-            (
-                length_m,
-                total_drive_distance_m,
-                1 if is_completed else 0,
-                undriven,
-                report_id,
-            ),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE pipe_information
+                SET length_m = ?, total_drive_distance_m = ?,
+                    is_completed = ?, undriven_distance_m = ?
+                WHERE report_id = ?
+                """,
+                (
+                    length_m,
+                    total_drive_distance_m,
+                    1 if is_completed else 0,
+                    undriven,
+                    report_id,
+                ),
+            )
+            self._touch_report_version(conn, report_id)
 
     @staticmethod
     def compute_pipe_completion(
@@ -1232,10 +1691,12 @@ class Database:
         self.ensure_report_children(report_id)
         values = [payload.get(field) for field in ACTUAL_SURVEY_FIELDS]
         assignments = ", ".join(f"{field} = ?" for field in ACTUAL_SURVEY_FIELDS)
-        self.execute(
-            f"UPDATE actual_survey_information SET {assignments} WHERE report_id = ?",
-            tuple(values + [report_id]),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                f"UPDATE actual_survey_information SET {assignments} WHERE report_id = ?",
+                tuple(values + [report_id]),
+            )
+            self._touch_report_version(conn, report_id)
 
     def get_actual_survey(self, report_id: int) -> Optional[sqlite3.Row]:
         self.ensure_report_children(report_id)
@@ -1254,42 +1715,59 @@ class Database:
     ) -> int:
         existing = self.get_video(report_id)
         if existing is None:
-            return self.execute(
-                """
-                INSERT INTO report_videos(
-                    report_id, file_path, duration, recorded_date, scan_direction
+            with self.transaction() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO report_videos(
+                        report_id, file_path, duration, recorded_date, scan_direction
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (report_id, file_path, duration, recorded_date, scan_direction),
                 )
-                VALUES (?, ?, ?, ?, ?)
+                self._touch_report_version(conn, report_id)
+                return int(cur.lastrowid)
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE report_videos
+                SET file_path = ?, duration = ?, recorded_date = ?, scan_direction = ?
+                WHERE report_id = ?
                 """,
-                (report_id, file_path, duration, recorded_date, scan_direction),
+                (file_path, duration, recorded_date, scan_direction, report_id),
             )
-        self.execute(
-            """
-            UPDATE report_videos
-            SET file_path = ?, duration = ?, recorded_date = ?, scan_direction = ?
-            WHERE report_id = ?
-            """,
-            (file_path, duration, recorded_date, scan_direction, report_id),
-        )
+            self._touch_report_version(conn, report_id)
         return int(existing["id"])
 
     def update_video_scan_direction(self, video_id: int, scan_direction: str) -> None:
-        self.execute(
-            "UPDATE report_videos SET scan_direction = ? WHERE id = ?",
-            (scan_direction, video_id),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE report_videos SET scan_direction = ? WHERE id = ?",
+                (scan_direction, video_id),
+            )
+            report = conn.execute(
+                "SELECT report_id FROM report_videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            if report is not None:
+                self._touch_report_version(conn, int(report["report_id"]))
 
     def update_video_depth_roi(
         self, video_id: int, roi_x: int, roi_y: int, roi_w: int, roi_h: int
     ) -> None:
-        self.execute(
-            """
-            UPDATE report_videos
-            SET depth_roi_x = ?, depth_roi_y = ?, depth_roi_w = ?, depth_roi_h = ?
-            WHERE id = ?
-            """,
-            (roi_x, roi_y, roi_w, roi_h, video_id),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE report_videos
+                SET depth_roi_x = ?, depth_roi_y = ?, depth_roi_w = ?, depth_roi_h = ?
+                WHERE id = ?
+                """,
+                (roi_x, roi_y, roi_w, roi_h, video_id),
+            )
+            report = conn.execute(
+                "SELECT report_id FROM report_videos WHERE id = ?", (video_id,)
+            ).fetchone()
+            if report is not None:
+                self._touch_report_version(conn, int(report["report_id"]))
 
     def get_video(self, report_id: int) -> Optional[sqlite3.Row]:
         return self.fetchone(
@@ -1317,45 +1795,67 @@ class Database:
     ) -> int:
         if distance_m is None:
             raise ValueError("distance_m is required")
-        return self.execute(
-            """
-            INSERT INTO report_defects(
-                report_id, video_id, timestamp_ms, image_path, drive_direction,
-                distance_m, item_category, condition_item, defect_item, grade,
-                quadrant, manhole_defect_depth_m, memo
+        with self.transaction() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO report_defects(
+                    report_id, video_id, timestamp_ms, image_path, drive_direction,
+                    distance_m, item_category, condition_item, defect_item, grade,
+                    quadrant, manhole_defect_depth_m, memo
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_id,
+                    video_id,
+                    timestamp_ms,
+                    image_path,
+                    drive_direction,
+                    distance_m,
+                    item_category,
+                    condition_item,
+                    defect_item,
+                    grade,
+                    quadrant,
+                    manhole_defect_depth_m,
+                    memo,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                report_id,
-                video_id,
-                timestamp_ms,
-                image_path,
-                drive_direction,
-                distance_m,
-                item_category,
-                condition_item,
-                defect_item,
-                grade,
-                quadrant,
-                manhole_defect_depth_m,
-                memo,
-            ),
-        )
+            self._touch_report_version(conn, report_id)
+            return int(cur.lastrowid)
 
     def update_defect(self, defect_id: int, payload: dict[str, object]) -> None:
         values = [payload.get(field) for field in DEFECT_FIELDS]
         assignments = ", ".join(f"{field} = ?" for field in DEFECT_FIELDS)
-        self.execute(
-            f"UPDATE report_defects SET {assignments} WHERE id = ?",
-            tuple(values + [defect_id]),
-        )
+        with self.transaction() as conn:
+            conn.execute(
+                f"UPDATE report_defects SET {assignments} WHERE id = ?",
+                tuple(values + [defect_id]),
+            )
+            defect = conn.execute(
+                "SELECT report_id FROM report_defects WHERE id = ?", (defect_id,)
+            ).fetchone()
+            if defect is not None:
+                self._touch_report_version(conn, int(defect["report_id"]))
+
+    def update_defect_image_path(self, defect_id: int, image_path: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE report_defects SET image_path = ? WHERE id = ?",
+                (image_path, defect_id),
+            )
 
     def get_defect(self, defect_id: int) -> Optional[sqlite3.Row]:
         return self.fetchone("SELECT * FROM report_defects WHERE id = ?", (defect_id,))
 
     def delete_defect(self, defect_id: int) -> None:
-        self.execute("DELETE FROM report_defects WHERE id = ?", (defect_id,))
+        with self.transaction() as conn:
+            defect = conn.execute(
+                "SELECT report_id FROM report_defects WHERE id = ?", (defect_id,)
+            ).fetchone()
+            conn.execute("DELETE FROM report_defects WHERE id = ?", (defect_id,))
+            if defect is not None:
+                self._touch_report_version(conn, int(defect["report_id"]))
 
     def list_defects(self, report_id: int) -> list[sqlite3.Row]:
         return self.fetchall(

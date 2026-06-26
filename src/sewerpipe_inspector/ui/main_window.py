@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -89,6 +91,8 @@ from sewerpipe_inspector.ui.widgets import TimelineSlider
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_ID = Qt.ItemDataRole.UserRole + 1
+ROLE_NAV_TYPE = Qt.ItemDataRole.UserRole + 2
+ROLE_VERSION_GROUP_ID = Qt.ItemDataRole.UserRole + 3
 ROLE_STOP_ITEM_TYPE = Qt.ItemDataRole.UserRole + 20
 ROLE_STOP_TIMESTAMP_MS = Qt.ItemDataRole.UserRole + 21
 TABLE_ROW_COLOR = "#ffffff"
@@ -1345,6 +1349,7 @@ class MainWindow(QMainWindow):
         self.current_project_id: Optional[int] = None
         self.current_business_id: Optional[int] = None
         self.current_report_id: Optional[int] = None
+        self.current_version_group_id: Optional[int] = None
         self.current_video_id: Optional[int] = None
         self.current_video_path: Optional[Path] = None
         self.current_video_meta: Optional[VideoMeta] = None
@@ -1368,6 +1373,8 @@ class MainWindow(QMainWindow):
         self._stop_segment_resize_start_width = STOP_SEGMENT_PANEL_DEFAULT_WIDTH
         self._updating_navigation = False
         self._loading_report = False
+        self._report_details_dirty = False
+        self._expanded_report_version_groups: set[int] = set()
         self._syncing_defect_item_state = False
         self._database_error_reported = False
 
@@ -1481,12 +1488,16 @@ class MainWindow(QMainWindow):
         self.project_nav = NavigationList("project", self)
         self.business_nav = NavigationList("business", self)
         self.report_nav = NavigationList("report", self)
+        self.report_nav.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.project_nav.itemSelectionChanged.connect(self._project_selection_changed)
         self.business_nav.itemSelectionChanged.connect(self._business_selection_changed)
         self.report_nav.itemSelectionChanged.connect(self._report_selection_changed)
         self.project_nav.itemClicked.connect(lambda _item: self._project_selection_changed())
         self.business_nav.itemClicked.connect(lambda _item: self._business_selection_changed())
         self.report_nav.itemClicked.connect(lambda _item: self._report_selection_changed())
+        self.report_nav.customContextMenuRequested.connect(
+            self._show_report_nav_context_menu
+        )
         self.project_nav_group = self._wrap_nav_group("프로젝트", self.project_nav)
         self.project_nav_group.set_title_clickable(True)
         self.project_nav_group.title_clicked.connect(self._show_project_root_from_nav)
@@ -2039,6 +2050,7 @@ class MainWindow(QMainWindow):
                 "완주여부",
                 "영상",
                 "결함 수",
+                "버전 수",
             ],
             {
                 0: 0,
@@ -2050,6 +2062,7 @@ class MainWindow(QMainWindow):
                 6: 85,
                 7: 70,
                 8: 80,
+                9: 80,
             },
             {2},
         )
@@ -2862,6 +2875,7 @@ class MainWindow(QMainWindow):
         self.current_project_id = None
         self.current_business_id = None
         self.current_report_id = None
+        self.current_version_group_id = None
         self._set_page_header(
             "프로젝트 목록",
             "프로젝트별 사업과 보고서를 관리합니다.",
@@ -2893,6 +2907,7 @@ class MainWindow(QMainWindow):
         self.current_project_id = project_id
         self.current_business_id = None
         self.current_report_id = None
+        self.current_version_group_id = None
         self._set_page_header(
             f"{project['project_name']} - 사업 목록",
             "선택한 프로젝트의 사업을 생성하고 관리합니다.",
@@ -2925,6 +2940,7 @@ class MainWindow(QMainWindow):
         self.current_project_id = int(business["project_id"])
         self.current_business_id = business_id
         self.current_report_id = None
+        self.current_version_group_id = None
         project = self.db.get_project(self.current_project_id)
         project_name = project["project_name"] if project is not None else "프로젝트"
         self._set_page_header(
@@ -2955,6 +2971,7 @@ class MainWindow(QMainWindow):
                     "완주" if row["is_completed"] else "미완주",
                     "있음" if row["video_id"] is not None else "없음",
                     row["defect_count"],
+                    row["version_count"],
                 ],
             )
         self.right_stack.setCurrentWidget(self.report_list_page)
@@ -2971,9 +2988,19 @@ class MainWindow(QMainWindow):
             widget.blockSignals(blocked)
 
     def _find_nav_item(self, widget: QListWidget, entity_id: int) -> QListWidgetItem | None:
+        preferred: QListWidgetItem | None = None
         for row in range(widget.count()):
             item = widget.item(row)
             if int(item.data(ROLE_ID)) == entity_id:
+                if item.data(ROLE_NAV_TYPE) == "report_version":
+                    return item
+                preferred = item
+        if preferred is not None:
+            return preferred
+        for row in range(widget.count()):
+            item = widget.item(row)
+            group_id = item.data(ROLE_VERSION_GROUP_ID)
+            if group_id is not None and int(group_id) == entity_id:
                 return item
         return None
 
@@ -3018,6 +3045,33 @@ class MainWindow(QMainWindow):
             label = f"{business['business_code']} - {business['business_name']}"
             self.business_nav.addItem(self.business_nav.create_item(business["id"], label))
 
+    @staticmethod
+    def _report_version_nav_label(version) -> str:
+        version_name = version["version_name"] or f"v{version['version_number']}"
+        updated_at = version["updated_at"] or "-"
+        return f"{version_name} · 마지막 수정: {updated_at}"
+
+    def _set_report_group_item_widget(
+        self,
+        item: QListWidgetItem,
+        label: str,
+        version_group_id: int,
+    ) -> None:
+        expanded = version_group_id in self._expanded_report_version_groups
+        widget = ReportGroupNavWidget(
+            label,
+            expanded=expanded,
+            parent=self.report_nav,
+        )
+        widget.toggle_button.clicked.connect(
+            lambda _checked=False, group_id=version_group_id: (
+                self._toggle_report_versions(group_id)
+            )
+        )
+        item.setText("")
+        item.setToolTip(label)
+        self.report_nav.setItemWidget(item, widget)
+
     def _populate_report_nav(self, business_id: int | None) -> None:
         self.report_nav.clear()
         if business_id is None:
@@ -3030,7 +3084,75 @@ class MainWindow(QMainWindow):
         self._database_error_reported = False
         for report in reports:
             label = f"{report['report_number']} / {report['pipe_number']}"
-            self.report_nav.addItem(self.report_nav.create_item(report["id"], label))
+            version_group_id = int(report["version_group_id"])
+            self.report_nav.addItem(
+                self.report_nav.create_item(
+                    int(report["id"]),
+                    label,
+                    nav_type="report_group",
+                    version_group_id=version_group_id,
+                )
+            )
+            group_item = self.report_nav.item(self.report_nav.count() - 1)
+            self._set_report_group_item_widget(
+                group_item,
+                label,
+                version_group_id,
+            )
+            if version_group_id not in self._expanded_report_version_groups:
+                continue
+            for version in self.db.list_report_versions(version_group_id):
+                self.report_nav.addItem(
+                    self.report_nav.create_item(
+                        int(version["id"]),
+                        self._report_version_nav_label(version),
+                        nav_type="report_version",
+                        version_group_id=version_group_id,
+                    )
+                )
+
+    def _select_report_group_nav_item(self, version_group_id: int) -> bool:
+        for row in range(self.report_nav.count()):
+            item = self.report_nav.item(row)
+            if item.data(ROLE_NAV_TYPE) != "report_group":
+                continue
+            if int(item.data(ROLE_VERSION_GROUP_ID) or -1) != version_group_id:
+                continue
+            self.report_nav.setCurrentItem(item)
+            item.setSelected(True)
+            return True
+        return False
+
+    def _toggle_report_versions(self, version_group_id: int) -> None:
+        if version_group_id in self._expanded_report_version_groups:
+            self._expanded_report_version_groups.remove(version_group_id)
+        else:
+            self._expanded_report_version_groups.add(version_group_id)
+
+        business_id = self.current_business_id
+        if business_id is None:
+            business_item = self.business_nav.currentItem()
+            business_id = (
+                int(business_item.data(ROLE_ID))
+                if business_item
+                else None
+            )
+        if business_id is None:
+            return
+
+        self._set_navigation_blocked(True)
+        try:
+            self._populate_report_nav(business_id)
+            selected = False
+            if self.current_report_id is not None:
+                selected = self._set_nav_selection(
+                    self.report_nav,
+                    self.current_report_id,
+                )
+            if not selected:
+                self._select_report_group_nav_item(version_group_id)
+        finally:
+            self._set_navigation_blocked(False)
 
     def _handle_database_error(self, exc: sqlite3.Error) -> None:
         self.logger.exception("Database access failed")
@@ -3051,8 +3173,16 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_tree(
-        self, select_kind: str | None = None, select_id: int | None = None
-    ) -> None:
+        self,
+        select_kind: str | None = None,
+        select_id: int | None = None,
+        *,
+        flush_pending: bool = True,
+    ) -> bool:
+        if flush_pending and not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return False
+
         if select_kind is None:
             select_kind, select_id = self._current_navigation_selection()
 
@@ -3073,6 +3203,9 @@ class MainWindow(QMainWindow):
                 project_id = int(context["project_id"])
                 business_id = int(context["business_id"])
                 report_id = select_id
+                self._expanded_report_version_groups.add(
+                    int(context["version_group_id"])
+                )
 
         self._set_navigation_blocked(True)
         try:
@@ -3086,16 +3219,46 @@ class MainWindow(QMainWindow):
             self._set_navigation_blocked(False)
 
         if report_id is not None and report_selected:
-            self.load_report(report_id)
+            self.load_report(report_id, flush_pending=False)
         elif business_id is not None and business_selected:
-            self._reset_report_workspace()
+            self._reset_report_workspace(flush_pending=False)
             self._show_report_list(business_id)
         elif project_id is not None and project_selected:
-            self._reset_report_workspace()
+            self._reset_report_workspace(flush_pending=False)
             self._show_business_list(project_id)
         else:
-            self._reset_report_workspace()
+            self._reset_report_workspace(flush_pending=False)
             self._show_project_list()
+        return True
+
+    def _restore_current_navigation_selection(self) -> None:
+        project_id = self.current_project_id
+        business_id = self.current_business_id
+        report_id = self.current_report_id
+
+        if report_id is not None:
+            context = self.db.get_report_context(report_id)
+            if context is not None:
+                project_id = int(context["project_id"])
+                business_id = int(context["business_id"])
+        elif business_id is not None:
+            business = self.db.get_business(business_id)
+            if business is not None:
+                project_id = int(business["project_id"])
+
+        self._set_navigation_blocked(True)
+        try:
+            self._populate_project_nav()
+            project_selected = self._set_nav_selection(self.project_nav, project_id)
+            self._populate_business_nav(project_id if project_selected else None)
+            business_selected = self._set_nav_selection(self.business_nav, business_id)
+            self._populate_report_nav(business_id if business_selected else None)
+            self._set_nav_selection(
+                self.report_nav,
+                report_id if business_selected else None,
+            )
+        finally:
+            self._set_navigation_blocked(False)
 
     def _require_table_selection(
         self, table: QTableWidget, label: str
@@ -3366,7 +3529,8 @@ class MainWindow(QMainWindow):
             self._select_tree_entity("business", self.current_business_id)
 
     def _select_tree_entity(self, kind: str, entity_id: int) -> bool:
-        self.refresh_tree(kind, entity_id)
+        if not self.refresh_tree(kind, entity_id):
+            return False
         selected_kind, selected_id = self._current_navigation_selection()
         return selected_kind == kind and selected_id == entity_id
 
@@ -3379,6 +3543,8 @@ class MainWindow(QMainWindow):
         new_workspace = Path(selected)
         if not new_workspace.exists() or not new_workspace.is_dir():
             QMessageBox.warning(self, "작업 폴더", "유효한 폴더가 아닙니다")
+            return
+        if not self._flush_pending_report_autosave():
             return
         self.stop_playback()
         self._release_video()
@@ -3409,6 +3575,9 @@ class MainWindow(QMainWindow):
     def _project_selection_changed(self) -> None:
         if self._updating_navigation:
             return
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
         items = self.project_nav.selectedItems()
         current = items[0] if items else None
         self._set_navigation_blocked(True)
@@ -3419,13 +3588,16 @@ class MainWindow(QMainWindow):
             self._populate_business_nav(project_id)
         finally:
             self._set_navigation_blocked(False)
-        self._reset_report_workspace()
+        self._reset_report_workspace(flush_pending=False)
         if project_id is None:
             self._show_project_list()
             return
         self._show_business_list(project_id)
 
     def _show_project_root_from_nav(self) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
         self._set_navigation_blocked(True)
         try:
             self.project_nav.clearSelection()
@@ -3434,11 +3606,14 @@ class MainWindow(QMainWindow):
             self.report_nav.clear()
         finally:
             self._set_navigation_blocked(False)
-        self._reset_report_workspace()
+        self._reset_report_workspace(flush_pending=False)
         self._show_project_list()
 
     def _business_selection_changed(self) -> None:
         if self._updating_navigation:
+            return
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
             return
         items = self.business_nav.selectedItems()
         current = items[0] if items else None
@@ -3449,7 +3624,7 @@ class MainWindow(QMainWindow):
             self._populate_report_nav(business_id)
         finally:
             self._set_navigation_blocked(False)
-        self._reset_report_workspace()
+        self._reset_report_workspace(flush_pending=False)
         if business_id is None:
             project_item = self.project_nav.currentItem()
             if project_item is not None:
@@ -3462,10 +3637,13 @@ class MainWindow(QMainWindow):
     def _report_selection_changed(self) -> None:
         if self._updating_navigation:
             return
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
         items = self.report_nav.selectedItems()
         current = items[0] if items else None
         if current is None:
-            self._reset_report_workspace()
+            self._reset_report_workspace(flush_pending=False)
             business_item = self.business_nav.currentItem()
             if business_item is not None:
                 self._show_report_list(int(business_item.data(ROLE_ID)))
@@ -3476,9 +3654,126 @@ class MainWindow(QMainWindow):
                 else:
                     self._show_project_list()
             return
-        self.load_report(int(current.data(ROLE_ID)))
+        self.load_report(int(current.data(ROLE_ID)), flush_pending=False)
 
-    def load_report(self, report_id: int) -> None:
+    def _show_report_nav_context_menu(self, pos: QPoint) -> None:
+        item = self.report_nav.itemAt(pos)
+        if item is None:
+            return
+        nav_type = item.data(ROLE_NAV_TYPE)
+        version_group_id = item.data(ROLE_VERSION_GROUP_ID)
+        report_id = item.data(ROLE_ID)
+        if version_group_id is None or report_id is None:
+            return
+        version_group_id = int(version_group_id)
+        report_id = int(report_id)
+        menu = QMenu(self)
+        delete_version_action = None
+        delete_report_action = None
+        create_version_action = menu.addAction("새 버전 생성")
+        if nav_type == "report_version":
+            delete_version_action = menu.addAction("버전 삭제")
+        elif nav_type == "report_group":
+            delete_report_action = menu.addAction("보고서 전체 삭제")
+        action = menu.exec(self.report_nav.mapToGlobal(pos))
+        if action is None:
+            return
+        if action == create_version_action:
+            self.create_report_version_from_nav(int(version_group_id))
+        elif delete_version_action is not None and action == delete_version_action:
+            self.delete_report_version_from_nav(report_id, version_group_id)
+        elif delete_report_action is not None and action == delete_report_action:
+            self.delete_report_group_from_nav(report_id)
+
+    def create_report_version_from_nav(self, version_group_id: int) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
+        try:
+            report_id = self.inspection.create_report_version_from_latest(
+                version_group_id
+            )
+        except Exception as exc:
+            self.logger.exception("Failed to create report version")
+            QMessageBox.critical(self, "버전 생성 오류", str(exc))
+            return
+        self._expanded_report_version_groups.add(version_group_id)
+        self.refresh_tree("report", report_id)
+
+    def delete_report_version_from_nav(
+        self,
+        report_id: int,
+        version_group_id: int,
+    ) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
+        report = self.db.get_report(report_id)
+        if report is None:
+            return
+        version_name = report["version_name"] or f"v{report['version_number']}"
+        if (
+            QMessageBox.question(
+                self,
+                "버전 삭제",
+                f"{version_name} 버전을 삭제하시겠습니까?\n다른 버전은 유지됩니다.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        try:
+            next_report_id = self.inspection.delete_report_version_with_artifacts(
+                report_id
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "버전 삭제", str(exc))
+            return
+        except Exception as exc:
+            self.logger.exception("Failed to delete report version")
+            QMessageBox.critical(self, "버전 삭제 오류", str(exc))
+            return
+        self._expanded_report_version_groups.add(version_group_id)
+        if self.current_report_id == report_id:
+            self.refresh_tree("report", next_report_id)
+            return
+        self.refresh_tree("report", self.current_report_id or next_report_id)
+
+    def delete_report_group_from_nav(self, report_id: int) -> None:
+        if not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return
+        report = self.db.get_report(report_id)
+        if report is None:
+            return
+        version_group_id = int(report["version_group_id"])
+        business_id = self.current_business_id
+        if business_id is None:
+            context = self.db.get_report_context(report_id)
+            if context is not None:
+                business_id = int(context["business_id"])
+        if (
+            QMessageBox.question(
+                self,
+                "보고서 삭제",
+                "이 보고서와 모든 버전, 작업 폴더를 삭제하시겠습니까?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self.inspection.delete_report_with_artifacts(report_id)
+        self._expanded_report_version_groups.discard(version_group_id)
+        if self.current_version_group_id == version_group_id:
+            self.current_report_id = None
+            self._reset_report_workspace(flush_pending=False)
+        if business_id is not None:
+            self.refresh_tree("business", business_id)
+        else:
+            self.refresh_tree()
+
+    def load_report(self, report_id: int, *, flush_pending: bool = True) -> bool:
+        if flush_pending and not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return False
         report_changed = self.current_report_id != report_id
         if report_changed:
             self._clear_stop_segments()
@@ -3491,17 +3786,20 @@ class MainWindow(QMainWindow):
         downstream = self.db.get_manhole(report_id, "downstream")
         actual = self.db.get_actual_survey(report_id)
         if report is None or context is None:
-            return
+            return False
         self.current_project_id = int(context["project_id"])
         self.current_business_id = int(context["business_id"])
+        self.current_version_group_id = int(report["version_group_id"])
+        version_name = report["version_name"] or f"v{report['version_number']}"
         self._set_page_header(
-            f"보고서 {report['report_number']} / {report['pipe_number']}",
-            "보고서 정보, 영상, 결함 기록을 관리합니다.",
+            f"보고서 {report['report_number']} / {report['pipe_number']} · {version_name}",
+            "선택한 버전 작업본의 보고서 정보, 영상, 결함 기록을 자동 저장합니다.",
             [
                 "Pipe1",
                 context["project_name"],
                 f"{context['business_code']} / {context['business_name']}",
                 f"{report['report_number']} / {report['pipe_number']}",
+                version_name,
             ],
         )
         self.right_stack.setCurrentWidget(self.report_detail_page)
@@ -3548,25 +3846,41 @@ class MainWindow(QMainWindow):
         self.refresh_defects()
         self.update_summary()
         self.update_export_state()
+        self._report_details_dirty = False
+        return True
 
     def schedule_report_autosave(self, *_args) -> None:
         if self._loading_report or self.current_report_id is None:
             return
+        self._report_details_dirty = True
         self.update_export_state()
         self.autosave_timer.start(700)
 
     def _autosave_report_details(self) -> None:
-        if self._loading_report or self.current_report_id is None:
-            return
+        self._flush_pending_report_autosave(show_errors=False)
+
+    def _flush_pending_report_autosave(self, *, show_errors: bool = True) -> bool:
+        if (
+            self._loading_report
+            or self.current_report_id is None
+            or not self._report_details_dirty
+        ):
+            return True
+        self.autosave_timer.stop()
         try:
             self.save_report_details_without_message()
-        except ValueError:
-            return
-        except Exception:
-            self.logger.exception("Failed to autosave report details")
-            return
+        except ValueError as exc:
+            if show_errors:
+                QMessageBox.warning(self, "자동 저장 실패", str(exc))
+            return False
+        except Exception as exc:
+            self.logger.exception("Failed to flush autosave")
+            if show_errors:
+                QMessageBox.critical(self, "자동 저장 실패", str(exc))
+            return False
         self._update_current_report_nav_label()
         self.update_export_state()
+        return True
 
     def _update_current_report_nav_label(self) -> None:
         if self.current_report_id is None:
@@ -3574,13 +3888,27 @@ class MainWindow(QMainWindow):
         report = self.db.get_report(self.current_report_id)
         if report is None:
             return
-        item = self._find_nav_item(self.report_nav, self.current_report_id)
-        if item is not None:
-            item.setText(
-                self.report_nav.format_label(
-                    f"{report['report_number']} / {report['pipe_number']}"
-                )
-            )
+        version_group_id = int(report["version_group_id"])
+        parent_label = f"{report['report_number']} / {report['pipe_number']}"
+        version_labels = {
+            int(version["id"]): self._report_version_nav_label(version)
+            for version in self.db.list_report_versions(version_group_id)
+        }
+        for row in range(self.report_nav.count()):
+            item = self.report_nav.item(row)
+            if int(item.data(ROLE_VERSION_GROUP_ID) or -1) != version_group_id:
+                continue
+            if item.data(ROLE_NAV_TYPE) == "report_group":
+                item.setText("")
+                item.setToolTip(parent_label)
+                widget = self.report_nav.itemWidget(item)
+                if isinstance(widget, ReportGroupNavWidget):
+                    widget.set_label(parent_label)
+                    widget.set_expanded(
+                        version_group_id in self._expanded_report_version_groups
+                    )
+            elif int(item.data(ROLE_ID)) in version_labels:
+                item.setText(f"     {version_labels[int(item.data(ROLE_ID))]}")
 
     def _fill_pair_items(self, table: QTableWidget, pairs: list[tuple[str, object]]) -> None:
         table.clearContents()
@@ -3610,12 +3938,16 @@ class MainWindow(QMainWindow):
             ]
         self._fill_pair_items(self.video_info_table, pairs)
 
-    def _reset_report_workspace(self) -> None:
+    def _reset_report_workspace(self, *, flush_pending: bool = True) -> bool:
+        if flush_pending and not self._flush_pending_report_autosave():
+            self._restore_current_navigation_selection()
+            return False
         self._set_report_controls_enabled(False)
         self.autosave_timer.stop()
         self.stop_playback()
         self._release_video()
         self.center_panel.setVisible(False)
+        self.current_version_group_id = None
         self.current_video_id = None
         self.current_video_path = None
         self.current_video_meta = None
@@ -3633,16 +3965,23 @@ class MainWindow(QMainWindow):
         self.timeline_slider.set_markers([])
         self.current_time_label.setText("00:00")
         self.total_time_label.setText("00:00")
-        for edit in self.report_inputs.values():
-            edit.clear()
-        for role_inputs in self.manhole_inputs.values():
-            for widget in role_inputs.values():
-                clear_input_widget(widget)
+        was_loading = self._loading_report
+        self._loading_report = True
+        try:
+            for edit in self.report_inputs.values():
+                edit.clear()
+            for role_inputs in self.manhole_inputs.values():
+                for widget in role_inputs.values():
+                    clear_input_widget(widget)
+        finally:
+            self._loading_report = was_loading
+        self._report_details_dirty = False
         self.video_info_table.clearContents()
         self.defect_table.setRowCount(0)
         self._refresh_unit_state_grades([])
         fit_table_height_to_contents(self.defect_table)
         self.update_summary()
+        return True
 
     def _set_report_controls_enabled(self, enabled: bool) -> None:
         for widget in self.report_controls:
@@ -3708,6 +4047,7 @@ class MainWindow(QMainWindow):
             self.logger.exception("Failed to save report details")
             QMessageBox.critical(self, "저장 오류", str(exc))
             return
+        self._report_details_dirty = False
         self.refresh_tree()
         self._select_tree_entity("report", report_id)
         if self.current_report_id != report_id:
@@ -3906,6 +4246,9 @@ class MainWindow(QMainWindow):
         self.timeline_slider.setMaximum(1)
 
     def closeEvent(self, event) -> None:
+        if not self._flush_pending_report_autosave():
+            event.ignore()
+            return
         self._release_video()
         super().closeEvent(event)
 
@@ -4649,6 +4992,7 @@ class MainWindow(QMainWindow):
             context["business_name"],
             context["report_number"],
             context["pipe_number"],
+            context["version_name"],
         )
         if output_dir is None:
             return default_path
@@ -4664,6 +5008,7 @@ class MainWindow(QMainWindow):
             context["business_name"],
             context["report_number"],
             context["pipe_number"],
+            context["version_name"],
         )
 
     def _selected_output_dir(self, raw_path: str) -> Path | None:
@@ -4795,6 +5140,7 @@ class MainWindow(QMainWindow):
                 "survey_content": self.survey_content_input.text().strip() or None,
             },
         )
+        self._report_details_dirty = False
 
     def _resolve_default_pipe_png_path(self) -> Optional[str]:
         cwd_pipe = Path.cwd() / "pipe.png"
@@ -4809,13 +5155,17 @@ class MainWindow(QMainWindow):
         options: list[tuple[int, str]] = []
         for row in self.db.list_report_contexts():
             report_id = int(row["id"])
+            if report_id == self.current_report_id:
+                continue
+            version_name = row["version_name"] or f"v{row['version_number']}"
             options.append(
                 (
                     report_id,
                     (
                         f"{row['project_name']} > "
                         f"{row['business_code']} {row['business_name']} > "
-                        f"{row['report_number']} / {row['pipe_number']}"
+                        f"{row['report_number']} / {row['pipe_number']} > "
+                        f"{version_name}"
                     ),
                 )
             )
@@ -4969,6 +5319,7 @@ class MainWindow(QMainWindow):
                 context["business_name"],
                 context["report_number"],
                 context["pipe_number"],
+                context["version_name"],
             )
         try:
             pipe_length = float(pipe_info["length_m"] or 0.0)
@@ -5073,6 +5424,60 @@ class NavSectionGroup(QGroupBox):
         self.content_layout.setContentsMargins(0, 0, 0, 4)
 
 
+class ReportGroupNavWidget(QWidget):
+    def __init__(
+        self,
+        label: str,
+        *,
+        expanded: bool,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(4)
+        self.label = QLabel(self)
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.label.setStyleSheet("color: #d9e3f1; background: transparent;")
+        self.label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setAutoRaise(True)
+        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_button.setFixedSize(24, 24)
+        self.toggle_button.setStyleSheet(
+            "QToolButton { border: 0; color: #d9e3f1; background: transparent; }"
+            "QToolButton:hover { background: rgba(255, 255, 255, 0.08); }"
+        )
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.toggle_button, 0, Qt.AlignmentFlag.AlignRight)
+        self.set_label(label)
+        self.set_expanded(expanded)
+
+    def set_label(self, label: str) -> None:
+        self.label.setText(f"  • {label}")
+
+    def set_expanded(self, expanded: bool) -> None:
+        arrow = Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        self.toggle_button.setArrowType(arrow)
+
+    def mousePressEvent(self, event) -> None:
+        widget = self.parent()
+        while widget is not None and not isinstance(widget, QListWidget):
+            widget = widget.parent()
+        if isinstance(widget, QListWidget):
+            for row in range(widget.count()):
+                item = widget.item(row)
+                if widget.itemWidget(item) is self:
+                    widget.setCurrentItem(item)
+                    item.setSelected(True)
+                    break
+        super().mousePressEvent(event)
+
+
 class NavigationList(QListWidget):
     ITEM_HEIGHT = 38
 
@@ -5088,15 +5493,31 @@ class NavigationList(QListWidget):
     def format_label(self, label: str) -> str:
         return f"  • {label}"
 
-    def create_item(self, entity_id: int, label: str) -> QListWidgetItem:
-        item = QListWidgetItem(self.format_label(label))
+    def create_item(
+        self,
+        entity_id: int,
+        label: str,
+        *,
+        nav_type: str | None = None,
+        version_group_id: int | None = None,
+    ) -> QListWidgetItem:
+        nav_type = nav_type or self.kind
+        display_label = self.format_label(label)
+        if nav_type == "report_version":
+            display_label = f"     {label}"
+        item = QListWidgetItem(display_label)
         item.setData(ROLE_KIND, self.kind)
         item.setData(ROLE_ID, entity_id)
+        item.setData(ROLE_NAV_TYPE, nav_type)
+        if version_group_id is not None:
+            item.setData(ROLE_VERSION_GROUP_ID, version_group_id)
         item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         item.setSizeHint(QSize(self._item_width(), self.ITEM_HEIGHT))
-        item.setForeground(QColor("#d9e3f1"))
+        item.setForeground(QColor("#b8c6d9" if nav_type == "report_version" else "#d9e3f1"))
         font = item.font()
         font.setBold(self.kind in {"project", "business"})
+        if nav_type == "report_version":
+            font.setPointSize(max(9, font.pointSize() - 1))
         item.setFont(font)
         return item
 

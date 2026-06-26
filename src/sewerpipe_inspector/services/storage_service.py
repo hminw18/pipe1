@@ -40,6 +40,26 @@ class StorageService:
             project_name, business_code, business_name
         ) / self._sanitize(report_part)
 
+    def report_version_root(
+        self,
+        project_name: str,
+        business_code: str,
+        business_name: str,
+        report_number: str,
+        pipe_number: str,
+        version_name: str | None = None,
+    ) -> Path:
+        root = self.report_root(
+            project_name,
+            business_code,
+            business_name,
+            report_number,
+            pipe_number,
+        )
+        if version_name:
+            return root / self._sanitize(version_name)
+        return root
+
     def remove_tree(self, path: Path) -> None:
         target = path.resolve()
         root = self.workspace_root.resolve()
@@ -55,13 +75,15 @@ class StorageService:
         business_name: str,
         report_number: str,
         pipe_number: str,
+        version_name: str | None = None,
     ) -> tuple[Path, Path]:
-        root = self.report_root(
+        root = self.report_version_root(
             project_name,
             business_code,
             business_name,
             report_number,
             pipe_number,
+            version_name,
         )
         captures = root / "captures"
         root.mkdir(parents=True, exist_ok=True)
@@ -77,6 +99,7 @@ class StorageService:
         pipe_number: str,
         video_filename: str,
         timestamp_ms: int,
+        version_name: str | None = None,
     ) -> Path:
         _, captures = self.ensure_report_dirs(
             project_name,
@@ -84,6 +107,7 @@ class StorageService:
             business_name,
             report_number,
             pipe_number,
+            version_name,
         )
         stem = Path(video_filename).stem
         return captures / f"{self._sanitize(stem)}_{timestamp_ms}.png"
@@ -95,6 +119,7 @@ class StorageService:
         business_name: str,
         report_number: str,
         pipe_number: str,
+        version_name: str | None = None,
     ) -> Path:
         root, _ = self.ensure_report_dirs(
             project_name,
@@ -102,8 +127,10 @@ class StorageService:
             business_name,
             report_number,
             pipe_number,
+            version_name,
         )
-        return root / f"{self._sanitize(report_number)}_InspectionReport.xlsx"
+        suffix = f"_{self._sanitize(version_name)}" if version_name else ""
+        return root / f"{self._sanitize(report_number)}{suffix}_InspectionReport.xlsx"
 
     def pdf_report_dir(
         self,
@@ -112,6 +139,7 @@ class StorageService:
         business_name: str,
         report_number: str,
         pipe_number: str,
+        version_name: str | None = None,
     ) -> Path:
         root, _ = self.ensure_report_dirs(
             project_name,
@@ -119,5 +147,6 @@ class StorageService:
             business_name,
             report_number,
             pipe_number,
+            version_name,
         )
         return root
