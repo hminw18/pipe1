@@ -41,7 +41,10 @@ def _now() -> datetime:
 
 
 def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid4().hex}"
+    id_prefix = f"{prefix}_"
+    if len(id_prefix) >= 36:
+        raise ValueError("id prefix is too long")
+    return f"{id_prefix}{uuid4().hex[: 36 - len(id_prefix)]}"
 
 
 def _iso(value: datetime | None) -> str | None:

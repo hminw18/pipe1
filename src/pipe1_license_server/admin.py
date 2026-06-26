@@ -42,7 +42,10 @@ def _parse_datetime(value: str | datetime | None) -> datetime | None:
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid4().hex}"
+    id_prefix = f"{prefix}_"
+    if len(id_prefix) >= 36:
+        raise ValueError("id prefix is too long")
+    return f"{id_prefix}{uuid4().hex[: 36 - len(id_prefix)]}"
 
 
 def _generate_raw_license_key() -> str:

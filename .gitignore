@@ -23,3 +23,5 @@ dist/
 reports/
 captures/
 exports/
+
+config/pipe1.client.env
