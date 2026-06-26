@@ -1,0 +1,7 @@
+{$PIPE1_LICENSE_DOMAIN} {
+    encode zstd gzip
+    request_body {
+        max_size 8MB
+    }
+    reverse_proxy api:8000
+}

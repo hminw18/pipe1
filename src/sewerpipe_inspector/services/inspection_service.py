@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import cv2
 
@@ -11,14 +11,22 @@ from sewerpipe_inspector.services.ocr_service import OCRService
 from sewerpipe_inspector.services.report_service import DefectReportRow, ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 
+if TYPE_CHECKING:
+    from sewerpipe_inspector.services.training_upload_service import TrainingUploadService
+
 
 class InspectionService:
     def __init__(
-        self, db: Database, storage: StorageService, report: ReportService
+        self,
+        db: Database,
+        storage: StorageService,
+        report: ReportService,
+        training_upload_service: "TrainingUploadService | None" = None,
     ) -> None:
         self.db = db
         self.storage = storage
         self.report = report
+        self.training_upload_service = training_upload_service
         self.ocr = OCRService()
         self.logger = logging.getLogger(self.__class__.__name__)
 
@@ -225,7 +233,7 @@ class InspectionService:
             for row in defects
         ]
 
-        return self.report.generate_inspection_report(
+        generated_path = self.report.generate_inspection_report(
             report_path=report_path,
             context=context,
             report=report,
@@ -235,3 +243,6 @@ class InspectionService:
             actual_survey=actual,
             defects=defect_payload,
         )
+        if self.training_upload_service is not None:
+            self.training_upload_service.queue_report_snapshot(report_id, "excel")
+        return generated_path

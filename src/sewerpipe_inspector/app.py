@@ -5,15 +5,27 @@ import sys
 from pathlib import Path
 
 from PySide6.QtGui import QFont, QFontDatabase
-from PySide6.QtWidgets import QApplication, QCheckBox, QFileDialog, QMessageBox
+from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QFileDialog, QMessageBox
 
 from sewerpipe_inspector.db import Database
 from sewerpipe_inspector.fonts import APP_FONT_FAMILY, find_app_font_paths
+from sewerpipe_inspector.licensing.config import (
+    LicenseRuntimeConfig,
+    build_license_service,
+    load_license_runtime_config,
+)
+from sewerpipe_inspector.licensing.errors import LicenseConfigurationError
+from sewerpipe_inspector.licensing.license_service import LicenseService, LicenseStatus
 from sewerpipe_inspector.logging_config import configure_logging
 from sewerpipe_inspector.services.inspection_service import InspectionService
 from sewerpipe_inspector.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
+from sewerpipe_inspector.services.training_upload_service import (
+    TrainingUploadClient,
+    TrainingUploadService,
+)
 from sewerpipe_inspector.settings_service import load_settings, save_settings
+from sewerpipe_inspector.ui.license_dialog import LicenseActivationDialog
 from sewerpipe_inspector.ui.main_window import MainWindow
 
 
@@ -37,9 +49,111 @@ def _apply_application_font(app: QApplication) -> None:
         app.setFont(font)
 
 
+def _ensure_license_activation() -> (
+    tuple[LicenseService | None, LicenseStatus | None, LicenseRuntimeConfig] | None
+):
+    try:
+        config = load_license_runtime_config()
+    except LicenseConfigurationError as exc:
+        QMessageBox.critical(None, "라이선스 설정 오류", str(exc))
+        return None
+
+    if not config.is_configured:
+        if config.require_activation:
+            QMessageBox.critical(
+                None,
+                "라이선스 설정 오류",
+                "라이선스 서버 주소와 공개키 설정이 필요합니다.",
+            )
+            return None
+        return None, None, config
+
+    try:
+        service = build_license_service(config)
+    except LicenseConfigurationError as exc:
+        QMessageBox.critical(None, "라이선스 설정 오류", str(exc))
+        return None
+
+    status = service.current_status()
+    if status.status == "active":
+        return service, status, config
+
+    dialog = LicenseActivationDialog(service)
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.license_status is None:
+        return None
+    return service, dialog.license_status, config
+
+
+def _build_training_upload_service(
+    db: Database,
+    license_status: LicenseStatus | None,
+    config: LicenseRuntimeConfig,
+) -> TrainingUploadService | None:
+    if license_status is None or not license_status.can_use_feature("training_upload"):
+        return None
+    if not config.api_base_url or not license_status.license_id:
+        return None
+    device_id = license_status.payload.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        return None
+
+    consent_type = "capture_images_and_labels"
+    consent = db.get_training_upload_consent(
+        license_status.license_id, device_id, consent_type
+    )
+    if consent is None:
+        accepted = _ask_training_upload_consent()
+        db.set_training_upload_consent(
+            license_id=license_status.license_id,
+            device_id=device_id,
+            consent_type=consent_type,
+            consent_version="2026-06-25",
+            accepted=accepted,
+            app_version=config.app_version,
+        )
+        consent = db.get_training_upload_consent(
+            license_status.license_id, device_id, consent_type
+        )
+    consent_enabled = bool(consent is not None and consent["accepted"])
+    consent_version = (
+        str(consent["consent_version"]) if consent is not None else "2026-06-25"
+    )
+    return TrainingUploadService(
+        db,
+        client=TrainingUploadClient(
+            config.api_base_url,
+            upload_token=license_status.device_upload_token,
+        ),
+        license_id=license_status.license_id,
+        device_id=device_id,
+        consent_enabled=consent_enabled,
+        consent_type=consent_type,
+        consent_version=consent_version,
+        app_version=config.app_version,
+    )
+
+
+def _ask_training_upload_consent() -> bool:
+    result = QMessageBox.question(
+        None,
+        "학습 데이터 업로드 동의",
+        (
+            "캡처 이미지와 결함/상태 라벨을 Pipe1 학습용 서버로 전송할까요?\n\n"
+            "원본 영상, 생성된 Excel/PDF, 메모, 주소 정보는 전송하지 않습니다."
+        ),
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    return result == QMessageBox.StandardButton.Yes
+
+
 def run() -> None:
     app = QApplication(sys.argv)
     _apply_application_font(app)
+    license_context = _ensure_license_activation()
+    if license_context is None:
+        return
+    _, license_status, license_config = license_context
     settings = load_settings()
 
     workspace: Path | None = None
@@ -94,8 +208,17 @@ def run() -> None:
         db = Database(workspace / "sewerpipe_inspector.db")
         storage = StorageService(workspace)
         report = ReportService()
-        inspection = InspectionService(db, storage, report)
+        training_upload_service = _build_training_upload_service(
+            db, license_status, license_config
+        )
+        inspection = InspectionService(
+            db, storage, report, training_upload_service=training_upload_service
+        )
         window = MainWindow(db, inspection)
+        if license_status is not None and license_status.masked_license_key:
+            window.statusBar().showMessage(
+                f"라이선스 활성화됨: {license_status.masked_license_key}"
+            )
         window.show()
         app.exec()
     except Exception:
