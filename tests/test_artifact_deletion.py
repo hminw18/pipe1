@@ -72,6 +72,48 @@ def test_delete_report_with_artifacts_removes_report_directory(tmp_path: Path) -
     assert not report_root.exists()
 
 
+def test_new_report_version_copies_capture_artifacts_to_version_dir(
+    tmp_path: Path,
+) -> None:
+    db, _storage, inspection = _make_inspection(tmp_path)
+    _project_id, _business_id, report_id, capture_path = _make_report_with_capture(
+        db, inspection.storage
+    )
+
+    version_group_id = int(db.get_report(report_id)["version_group_id"])
+    version_2_id = inspection.create_report_version_from_latest(version_group_id)
+
+    defects = db.list_defects(version_2_id)
+    assert len(defects) == 1
+    copied_path = Path(defects[0]["image_path"])
+    assert copied_path != capture_path
+    assert copied_path.exists()
+    assert copied_path.read_bytes() == b"capture"
+    assert copied_path.parent.name == "captures"
+    assert copied_path.parent.parent.name == "v2"
+    assert capture_path.exists()
+
+
+def test_delete_report_version_removes_only_that_version_artifacts(
+    tmp_path: Path,
+) -> None:
+    db, _storage, inspection = _make_inspection(tmp_path)
+    _project_id, _business_id, report_id, capture_path = _make_report_with_capture(
+        db, inspection.storage
+    )
+    version_group_id = int(db.get_report(report_id)["version_group_id"])
+    version_2_id = inspection.create_report_version_from_latest(version_group_id)
+    copied_path = Path(db.list_defects(version_2_id)[0]["image_path"])
+    version_2_root = copied_path.parent.parent
+
+    selected_id = inspection.delete_report_version_with_artifacts(version_2_id)
+
+    assert selected_id == report_id
+    assert db.get_report(version_2_id) is None
+    assert not version_2_root.exists()
+    assert capture_path.exists()
+
+
 def test_delete_business_with_artifacts_removes_business_directory(tmp_path: Path) -> None:
     db, storage, inspection = _make_inspection(tmp_path)
     _project_id, business_id, report_id, capture_path = _make_report_with_capture(

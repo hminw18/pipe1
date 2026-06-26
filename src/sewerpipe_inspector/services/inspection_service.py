@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -73,6 +74,7 @@ class InspectionService:
             pipe_number=context["pipe_number"],
             video_filename=video_file.name,
             timestamp_ms=timestamp_ms,
+            version_name=context["version_name"],
         )
 
         if not cv2.imwrite(str(capture_path), frame):
@@ -166,6 +168,42 @@ class InspectionService:
         self.db.delete_report(report_id)
         self._remove_artifact_paths(artifact_paths)
 
+    def delete_report_version_with_artifacts(self, report_id: int) -> int:
+        artifact_paths = self._report_version_artifact_paths(report_id)
+        next_report_id = self.db.delete_report_version(report_id)
+        self._remove_artifact_paths(artifact_paths)
+        return next_report_id
+
+    def create_report_version_from_latest(self, version_group_id: int) -> int:
+        new_report_id = self.db.create_report_version_from_latest(version_group_id)
+        self._copy_version_capture_artifacts(new_report_id)
+        return new_report_id
+
+    def _copy_version_capture_artifacts(self, new_report_id: int) -> None:
+        context = self.db.get_report_context(new_report_id)
+        video = self.db.get_video(new_report_id)
+        if context is None or video is None:
+            return
+        video_file = Path(video["file_path"])
+        for defect in self.db.list_defects(new_report_id):
+            source = Path(defect["image_path"])
+            if not source.exists():
+                continue
+            target = self.storage.capture_path(
+                project_name=context["project_name"],
+                business_code=context["business_code"],
+                business_name=context["business_name"],
+                report_number=context["report_number"],
+                pipe_number=context["pipe_number"],
+                video_filename=video_file.name,
+                timestamp_ms=int(defect["timestamp_ms"]),
+                version_name=context["version_name"],
+            )
+            if source.resolve() != target.resolve():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            self.db.update_defect_image_path(int(defect["id"]), str(target))
+
     def _report_artifact_paths(self, report_id: int) -> set[Path]:
         artifact_paths: set[Path] = set()
         context = self.db.get_report_context(report_id)
@@ -185,8 +223,33 @@ class InspectionService:
                 artifact_paths.add(image_path.parent.parent)
         return artifact_paths
 
+    def _report_version_artifact_paths(self, report_id: int) -> set[Path]:
+        artifact_paths: set[Path] = set()
+        context = self.db.get_report_context(report_id)
+        if context is not None and context["version_name"]:
+            artifact_paths.add(
+                self.storage.report_version_root(
+                    context["project_name"],
+                    context["business_code"],
+                    context["business_name"],
+                    context["report_number"],
+                    context["pipe_number"],
+                    context["version_name"],
+                )
+            )
+        for defect in self.db.list_defects(report_id):
+            image_path = Path(defect["image_path"])
+            if image_path.exists():
+                artifact_paths.add(image_path)
+        return artifact_paths
+
     def _remove_artifact_paths(self, artifact_paths: set[Path]) -> None:
         for path in sorted(artifact_paths, key=lambda item: len(item.parts)):
+            if not path.exists():
+                continue
+            if path.is_file():
+                path.unlink(missing_ok=True)
+                continue
             self.storage.remove_tree(path)
 
     def generate_excel_report(self, report_id: int) -> Path:
@@ -205,6 +268,7 @@ class InspectionService:
             context["business_name"],
             context["report_number"],
             context["pipe_number"],
+            context["version_name"],
         )
 
         defects = self.db.list_defects(report_id)

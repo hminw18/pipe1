@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import sewerpipe_inspector.db as db_module
 from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, Database, MANHOLE_FIELDS, REPORT_FIELDS
 
 
@@ -290,6 +291,111 @@ def test_duplicate_report_number_is_made_unique(tmp_path: Path) -> None:
 
     assert db.get_report(first_copy_id)["report_number"] == "R001 복사본"
     assert db.get_report(second_copy_id)["report_number"] == "R001 복사본 2"
+
+
+def test_report_version_copies_latest_and_keeps_version_edits_independent(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "app.db")
+    report_id = _make_report(db)
+    payload = {field: None for field in REPORT_FIELDS}
+    payload.update(
+        {
+            "report_number": "R001",
+            "pipe_number": "PIPE-001",
+            "survey_date": "2026-06-14",
+            "buried_years": "12",
+        }
+    )
+    db.update_report(report_id, payload)
+    db.update_pipe_information(report_id, 10.0, 7.0)
+    video_id = db.upsert_video(report_id, str(tmp_path / "a.mp4"), 10.0, None, "순주행")
+    db.create_defect(
+        report_id,
+        video_id,
+        1000,
+        str(tmp_path / "a.png"),
+        "순주행",
+        1.0,
+        "관로",
+        "구조특징",
+        "균열(길이)",
+        "중",
+        "상",
+        None,
+        None,
+    )
+
+    version_group_id = int(db.get_report(report_id)["version_group_id"])
+    version_2_id = db.create_report_version_from_latest(version_group_id)
+
+    version_1 = db.get_report(report_id)
+    version_2 = db.get_report(version_2_id)
+    assert version_2["version_group_id"] == version_1["version_group_id"]
+    assert version_2["version_number"] == 2
+    assert version_2["report_number"] == "R001"
+    assert version_2["pipe_number"] == "PIPE-001"
+    assert version_2["survey_date"] == "2026-06-14"
+    assert db.get_pipe_information(version_2_id)["length_m"] == 10.0
+    assert db.get_video(version_2_id)["file_path"].endswith("a.mp4")
+    assert len(db.list_defects(version_2_id)) == 1
+
+    payload.update({"report_number": "R001-RENAMED", "survey_date": "2026-06-15"})
+    db.update_report(version_2_id, payload)
+
+    assert db.get_report(report_id)["report_number"] == "R001-RENAMED"
+    assert db.get_report(version_2_id)["report_number"] == "R001-RENAMED"
+    assert db.get_report(report_id)["survey_date"] == "2026-06-14"
+    assert db.get_report(version_2_id)["survey_date"] == "2026-06-15"
+
+    rows = db.list_reports_with_counts(1)
+    assert len(rows) == 1
+    assert rows[0]["id"] == version_2_id
+    assert rows[0]["version_count"] == 2
+
+
+def test_report_updated_at_uses_korea_time_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(db_module, "_kst_timestamp", lambda: "2026-06-27 12:34:56")
+    db = Database(tmp_path / "app.db")
+
+    report_id = _make_report(db)
+
+    assert db.get_report(report_id)["updated_at"] == "2026-06-27 12:34:56"
+
+    monkeypatch.setattr(db_module, "_kst_timestamp", lambda: "2026-06-27 12:35:10")
+    db.update_pipe_information(report_id, 10.0, 5.0)
+
+    assert db.get_report(report_id)["updated_at"] == "2026-06-27 12:35:10"
+
+
+def test_delete_report_version_reassigns_group_when_root_version_is_deleted(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "app.db")
+    report_id = _make_report(db)
+    version_group_id = int(db.get_report(report_id)["version_group_id"])
+    version_2_id = db.create_report_version_from_latest(version_group_id)
+    version_3_id = db.create_report_version_from_latest(version_group_id)
+
+    selected_id = db.delete_report_version(report_id)
+
+    assert selected_id == version_3_id
+    assert db.get_report(report_id) is None
+    version_2 = db.get_report(version_2_id)
+    version_3 = db.get_report(version_3_id)
+    assert version_2["version_group_id"] == version_2_id
+    assert version_3["version_group_id"] == version_2_id
+    assert [row["id"] for row in db.list_report_versions(version_2_id)] == [
+        version_2_id,
+        version_3_id,
+    ]
+
+    db.delete_report_version(version_3_id)
+    with pytest.raises(ValueError, match="마지막 버전"):
+        db.delete_report_version(version_2_id)
 
 
 def test_existing_duplicate_business_and_report_numbers_are_migrated(tmp_path: Path) -> None:
