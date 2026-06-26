@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -194,6 +195,55 @@ CREATE TABLE IF NOT EXISTS report_defects (
     FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
     FOREIGN KEY(video_id) REFERENCES report_videos(id)
 );
+
+CREATE TABLE IF NOT EXISTS training_upload_snapshots (
+    id INTEGER PRIMARY KEY,
+    report_id INTEGER NOT NULL,
+    report_fingerprint TEXT NOT NULL,
+    export_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'uploading', 'uploaded', 'failed')),
+    server_snapshot_id TEXT,
+    error_message TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    uploaded_at DATETIME,
+    UNIQUE(report_id, report_fingerprint, export_type),
+    FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS training_upload_samples (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL,
+    defect_id INTEGER NOT NULL,
+    image_path TEXT NOT NULL,
+    image_sha256 TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending', 'uploaded', 'failed')),
+    server_sample_id TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    uploaded_at DATETIME,
+    UNIQUE(snapshot_id, defect_id, image_sha256),
+    FOREIGN KEY(snapshot_id) REFERENCES training_upload_snapshots(id) ON DELETE CASCADE,
+    FOREIGN KEY(defect_id) REFERENCES report_defects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS training_upload_consents (
+    id INTEGER PRIMARY KEY,
+    license_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    consent_type TEXT NOT NULL,
+    consent_version TEXT NOT NULL,
+    accepted INTEGER NOT NULL CHECK(accepted IN (0, 1)),
+    app_version TEXT NOT NULL,
+    accepted_at DATETIME,
+    revoked_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(license_id, device_id, consent_type)
+);
 """
 
 
@@ -299,6 +349,24 @@ class Database:
             """
             CREATE INDEX IF NOT EXISTS idx_report_defects_video
             ON report_defects(video_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_training_upload_snapshots_status
+            ON training_upload_snapshots(status, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_training_upload_samples_snapshot
+            ON training_upload_samples(snapshot_id, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_training_upload_consents_license_device
+            ON training_upload_consents(license_id, device_id)
             """
         )
 
@@ -1299,6 +1367,242 @@ class Database:
             ORDER BY report_defects.timestamp_ms ASC, report_defects.id ASC
             """,
             (report_id,),
+        )
+
+    def create_training_upload_snapshot(
+        self,
+        *,
+        report_id: int,
+        report_fingerprint: str,
+        export_type: str,
+        payload: dict[str, object],
+        sample_count: int,
+    ) -> int:
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM training_upload_snapshots
+                WHERE report_id = ? AND report_fingerprint = ? AND export_type = ?
+                """,
+                (report_id, report_fingerprint, export_type),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = conn.execute(
+                """
+                INSERT INTO training_upload_snapshots(
+                    report_id, report_fingerprint, export_type, payload_json,
+                    sample_count, status
+                )
+                VALUES (?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    report_id,
+                    report_fingerprint,
+                    export_type,
+                    payload_json,
+                    sample_count,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def create_training_upload_sample(
+        self,
+        *,
+        snapshot_id: int,
+        defect_id: int,
+        image_path: str,
+        image_sha256: str,
+        payload: dict[str, object],
+    ) -> int:
+        payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM training_upload_samples
+                WHERE snapshot_id = ? AND defect_id = ? AND image_sha256 = ?
+                """,
+                (snapshot_id, defect_id, image_sha256),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = conn.execute(
+                """
+                INSERT INTO training_upload_samples(
+                    snapshot_id, defect_id, image_path, image_sha256, payload_json
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (snapshot_id, defect_id, image_path, image_sha256, payload_json),
+            )
+            return int(cur.lastrowid)
+
+    def list_training_upload_snapshots(
+        self, report_id: int | None = None
+    ) -> list[sqlite3.Row]:
+        if report_id is None:
+            return self.fetchall(
+                "SELECT * FROM training_upload_snapshots ORDER BY id ASC"
+            )
+        return self.fetchall(
+            """
+            SELECT * FROM training_upload_snapshots
+            WHERE report_id = ?
+            ORDER BY id ASC
+            """,
+            (report_id,),
+        )
+
+    def list_pending_training_upload_snapshots(self) -> list[sqlite3.Row]:
+        return self.fetchall(
+            """
+            SELECT * FROM training_upload_snapshots
+            WHERE status IN ('pending', 'failed')
+            ORDER BY id ASC
+            """
+        )
+
+    def list_training_upload_samples(self, snapshot_id: int) -> list[sqlite3.Row]:
+        return self.fetchall(
+            """
+            SELECT * FROM training_upload_samples
+            WHERE snapshot_id = ?
+            ORDER BY id ASC
+            """,
+            (snapshot_id,),
+        )
+
+    def mark_training_upload_snapshot_uploading(self, snapshot_id: int) -> None:
+        self.execute(
+            """
+            UPDATE training_upload_snapshots
+            SET status = 'uploading', error_message = NULL
+            WHERE id = ?
+            """,
+            (snapshot_id,),
+        )
+
+    def mark_training_upload_snapshot_uploaded(
+        self, snapshot_id: int, server_snapshot_id: str
+    ) -> None:
+        self.execute(
+            """
+            UPDATE training_upload_snapshots
+            SET status = 'uploaded', server_snapshot_id = ?,
+                error_message = NULL, uploaded_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (server_snapshot_id, snapshot_id),
+        )
+
+    def mark_training_upload_snapshot_failed(
+        self, snapshot_id: int, error_message: str
+    ) -> None:
+        self.execute(
+            """
+            UPDATE training_upload_snapshots
+            SET status = 'failed', error_message = ?
+            WHERE id = ?
+            """,
+            (error_message, snapshot_id),
+        )
+
+    def mark_training_upload_sample_uploaded(
+        self, sample_id: int, server_sample_id: str
+    ) -> None:
+        self.execute(
+            """
+            UPDATE training_upload_samples
+            SET status = 'uploaded', server_sample_id = ?,
+                uploaded_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (server_sample_id, sample_id),
+        )
+
+    def set_training_upload_consent(
+        self,
+        *,
+        license_id: str,
+        device_id: str,
+        consent_type: str,
+        consent_version: str,
+        accepted: bool,
+        app_version: str,
+    ) -> None:
+        with self.transaction() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM training_upload_consents
+                WHERE license_id = ? AND device_id = ? AND consent_type = ?
+                """,
+                (license_id, device_id, consent_type),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO training_upload_consents(
+                        license_id, device_id, consent_type, consent_version,
+                        accepted, app_version, accepted_at, revoked_at
+                    )
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?,
+                        CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                        CASE WHEN ? = 0 THEN CURRENT_TIMESTAMP ELSE NULL END
+                    )
+                    """,
+                    (
+                        license_id,
+                        device_id,
+                        consent_type,
+                        consent_version,
+                        1 if accepted else 0,
+                        app_version,
+                        1 if accepted else 0,
+                        1 if accepted else 0,
+                    ),
+                )
+                return
+            conn.execute(
+                """
+                UPDATE training_upload_consents
+                SET consent_version = ?,
+                    accepted = ?,
+                    app_version = ?,
+                    accepted_at = CASE
+                        WHEN ? = 1 THEN COALESCE(accepted_at, CURRENT_TIMESTAMP)
+                        ELSE accepted_at
+                    END,
+                    revoked_at = CASE
+                        WHEN ? = 0 THEN CURRENT_TIMESTAMP
+                        ELSE NULL
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    consent_version,
+                    1 if accepted else 0,
+                    app_version,
+                    1 if accepted else 0,
+                    1 if accepted else 0,
+                    int(existing["id"]),
+                ),
+            )
+
+    def get_training_upload_consent(
+        self,
+        license_id: str,
+        device_id: str,
+        consent_type: str = "capture_images_and_labels",
+    ) -> Optional[sqlite3.Row]:
+        return self.fetchone(
+            """
+            SELECT * FROM training_upload_consents
+            WHERE license_id = ? AND device_id = ? AND consent_type = ?
+            """,
+            (license_id, device_id, consent_type),
         )
 
     def get_grade_counts(self, report_id: int) -> GradeCounts:
