@@ -76,7 +76,7 @@ def test_condition_item_defect_can_have_no_grade(tmp_path: Path) -> None:
         1000,
         str(tmp_path / "a.png"),
         "순주행",
-        None,
+        0.0,
         "관로",
         "조사완료(순방향)",
         None,
@@ -90,6 +90,47 @@ def test_condition_item_defect_can_have_no_grade(tmp_path: Path) -> None:
     assert defect["condition_item"] == "조사완료(순방향)"
     assert defect["defect_item"] is None
     assert defect["grade"] is None
+    assert defect["distance_m"] == 0.0
+
+
+def test_defect_distance_is_required_by_schema(tmp_path: Path) -> None:
+    db = Database(tmp_path / "app.db")
+    report_id = _make_report(db)
+    video_id = db.upsert_video(report_id, str(tmp_path / "a.mp4"), 10.0, None, "순주행")
+
+    distance_column = next(
+        row for row in db.fetchall("PRAGMA table_info(report_defects)")
+        if row["name"] == "distance_m"
+    )
+    assert distance_column["notnull"] == 1
+
+    with pytest.raises(ValueError, match="distance_m"):
+        db.create_defect(
+            report_id,
+            video_id,
+            1000,
+            str(tmp_path / "a.png"),
+            "순주행",
+            None,
+            "관로",
+            "조사완료(순방향)",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        db.execute(
+            """
+            INSERT INTO report_defects(
+                report_id, video_id, timestamp_ms, image_path, drive_direction
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (report_id, video_id, 1000, str(tmp_path / "a.png"), "순주행"),
+        )
 
 
 def test_old_grade_not_null_schema_is_migrated(tmp_path: Path) -> None:
@@ -168,10 +209,16 @@ def test_old_grade_not_null_schema_is_migrated(tmp_path: Path) -> None:
         if row["name"] == "grade"
     )
     assert grade_column["notnull"] == 0
+    distance_column = next(
+        row for row in db.fetchall("PRAGMA table_info(report_defects)")
+        if row["name"] == "distance_m"
+    )
+    assert distance_column["notnull"] == 1
     migrated = db.get_defect(1)
     assert migrated["condition_item"] is None
     assert migrated["defect_item"] == "균열(길이)"
     assert migrated["grade"] == "대"
+    assert migrated["distance_m"] == 0.0
 
 
 def test_video_replacement_preserves_defects(tmp_path: Path) -> None:

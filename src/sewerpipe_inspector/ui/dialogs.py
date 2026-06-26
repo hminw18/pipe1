@@ -6,8 +6,15 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
+    QPushButton,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
 )
 
 
@@ -138,3 +145,199 @@ class AfterReportDialog(QDialog):
         if value in (None, -1):
             return None
         return int(value)
+
+
+class ReportExportDialog(QDialog):
+    def __init__(
+        self,
+        report_options: list[tuple[int, str]],
+        current_report_id: int,
+        default_output_dir: str,
+        excel_filename: str,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("보고서 생성")
+        self.resize(660, 310)
+        self._syncing_output_dir = False
+        self.output_dir_inputs: list[QLineEdit] = []
+
+        layout = QVBoxLayout(self)
+
+        self.tabs = QTabWidget(self)
+        self.tabs.setDocumentMode(False)
+        self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setUsesScrollButtons(False)
+        self.tabs.setStyleSheet(
+            """
+            QTabWidget::pane {
+                background: #ffffff;
+                border: 0;
+                margin: 0;
+            }
+            QTabWidget, QTabBar {
+                background: #ffffff;
+            }
+            QTabWidget::tab-bar {
+                left: 0;
+            }
+            QWidget#reportExportPanel {
+                background: #ffffff;
+                border: 1px solid #d7dde8;
+            }
+            QWidget#reportExportPanel QLabel {
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: #ffffff;
+                border: 1px solid #d7dde8;
+                color: #24324a;
+                padding: 8px 14px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #111827;
+                border-bottom: 1px solid #ffffff;
+            }
+            """
+        )
+        layout.addWidget(self.tabs)
+
+        excel_tab = QWidget(self)
+        excel_tab.setObjectName("reportExportPanel")
+        excel_layout = QVBoxLayout(excel_tab)
+        excel_layout.setContentsMargins(12, 12, 12, 12)
+        excel_layout.addWidget(QLabel("현재 선택된 보고서로 엑셀 보고서를 생성합니다.", excel_tab))
+        excel_layout.addWidget(QLabel(f"파일명 예시: {excel_filename}", excel_tab))
+        excel_layout.addStretch(1)
+        excel_layout.addLayout(self._build_output_dir_row(excel_tab, default_output_dir))
+        self.tabs.addTab(excel_tab, "엑셀 보고서 생성")
+
+        pdf_tab = QWidget(self)
+        pdf_tab.setObjectName("reportExportPanel")
+        pdf_layout = QVBoxLayout(pdf_tab)
+        pdf_layout.setContentsMargins(12, 12, 12, 12)
+        pdf_form = QFormLayout()
+        pdf_form.setContentsMargins(0, 0, 0, 0)
+        self.pdf_type_combo = QComboBox(pdf_tab)
+        self.pdf_type_combo.addItem("조사보고서", "inspection")
+        self.pdf_type_combo.addItem("보수후보고서", "post_repair")
+        self.pdf_type_combo.addItem("비교보고서", "comparison")
+        pdf_form.addRow("보고서 종류", self.pdf_type_combo)
+
+        self.before_report_combo = QComboBox(pdf_tab)
+        self.after_report_combo = QComboBox(pdf_tab)
+        for report_id, label in report_options:
+            self.before_report_combo.addItem(label, report_id)
+            self.after_report_combo.addItem(label, report_id)
+        self.before_report_combo.setMinimumWidth(480)
+        self.after_report_combo.setMinimumWidth(480)
+        self._select_combo_report(self.before_report_combo, current_report_id)
+        self._select_first_other_report(self.after_report_combo, current_report_id)
+
+        self.before_report_label = QLabel("보수전 보고서", pdf_tab)
+        self.after_report_label = QLabel("보수후 보고서", pdf_tab)
+        pdf_form.addRow(self.before_report_label, self.before_report_combo)
+        pdf_form.addRow(self.after_report_label, self.after_report_combo)
+        pdf_layout.addLayout(pdf_form)
+        pdf_layout.addStretch(1)
+        pdf_layout.addLayout(self._build_output_dir_row(pdf_tab, default_output_dir))
+        self.tabs.addTab(pdf_tab, "PDF 종합보고서")
+
+        self.pdf_type_combo.currentIndexChanged.connect(self._update_pdf_report_controls)
+        self._update_pdf_report_controls()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("생성")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _build_output_dir_row(
+        self, parent, default_output_dir: str
+    ) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(QLabel("생성 경로", parent))
+        row.addWidget(self._build_output_dir_widget(parent, default_output_dir), 1)
+        return row
+
+    def _build_output_dir_widget(self, parent, default_output_dir: str) -> QWidget:
+        wrapper = QWidget(parent)
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        edit = QLineEdit(default_output_dir, wrapper)
+        edit.setMinimumWidth(420)
+        edit.textChanged.connect(
+            lambda text, source=edit: self._sync_output_dir(text, source)
+        )
+        self.output_dir_inputs.append(edit)
+        browse_button = QPushButton("찾기", wrapper)
+        browse_button.clicked.connect(
+            lambda _checked=False, source=edit: self._choose_output_dir(source)
+        )
+        row.addWidget(edit, 1)
+        row.addWidget(browse_button)
+        return wrapper
+
+    def _sync_output_dir(self, text: str, source: QLineEdit) -> None:
+        if self._syncing_output_dir:
+            return
+        self._syncing_output_dir = True
+        try:
+            for edit in self.output_dir_inputs:
+                if edit is not source and edit.text() != text:
+                    edit.setText(text)
+        finally:
+            self._syncing_output_dir = False
+
+    def _select_combo_report(self, combo: QComboBox, report_id: int) -> None:
+        for idx in range(combo.count()):
+            if int(combo.itemData(idx)) == report_id:
+                combo.setCurrentIndex(idx)
+                return
+
+    def _select_first_other_report(self, combo: QComboBox, report_id: int) -> None:
+        for idx in range(combo.count()):
+            if int(combo.itemData(idx)) != report_id:
+                combo.setCurrentIndex(idx)
+                return
+        self._select_combo_report(combo, report_id)
+
+    def _update_pdf_report_controls(self) -> None:
+        is_comparison = self.pdf_report_type() == "comparison"
+        self.before_report_label.setVisible(is_comparison)
+        self.before_report_combo.setVisible(is_comparison)
+        self.after_report_label.setVisible(is_comparison)
+        self.after_report_combo.setVisible(is_comparison)
+
+    def _choose_output_dir(self, source: QLineEdit) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "생성 경로 선택",
+            source.text().strip(),
+        )
+        if selected:
+            source.setText(selected)
+
+    def selected_export_kind(self) -> str:
+        return "excel" if self.tabs.currentIndex() == 0 else "pdf"
+
+    def output_dir(self) -> str:
+        if not self.output_dir_inputs:
+            return ""
+        return self.output_dir_inputs[0].text().strip()
+
+    def pdf_report_type(self) -> str:
+        return str(self.pdf_type_combo.currentData())
+
+    def before_report_id(self) -> int:
+        return int(self.before_report_combo.currentData())
+
+    def after_report_id(self) -> int:
+        return int(self.after_report_combo.currentData())

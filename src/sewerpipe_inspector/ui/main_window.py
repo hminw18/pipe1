@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Optional
 
 import cv2
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QImage,
     QIcon,
     QKeySequence,
@@ -64,6 +65,13 @@ from sewerpipe_inspector.services.pdf_report_service import generate_pipe_pdf_re
 from sewerpipe_inspector.services.storage_service import StorageService
 from sewerpipe_inspector.services.video_service import VideoMeta, VideoService
 from sewerpipe_inspector.settings_service import load_settings, save_settings
+from sewerpipe_inspector.state_grading import (
+    compute_pipe_state_grades,
+    format_state_distance,
+    format_state_section_label,
+    format_state_time_range,
+    format_state_value,
+)
 from sewerpipe_inspector.stop_detection import (
     DepthOcrStopDetectionConfig,
     DepthOcrStopSegmentDetector,
@@ -71,10 +79,10 @@ from sewerpipe_inspector.stop_detection import (
     StopFrameCandidateDetector,
 )
 from sewerpipe_inspector.ui.dialogs import (
-    AfterReportDialog,
     BusinessDialog,
     ProjectDialog,
     ReportDialog,
+    ReportExportDialog,
 )
 from sewerpipe_inspector.ui.widgets import TimelineSlider
 
@@ -826,6 +834,13 @@ def parse_float(text: str) -> float | None:
         return float(raw)
     except ValueError as exc:
         raise ValueError("숫자 필드 값을 확인하세요") from exc
+
+
+def parse_required_float(text: str, label: str) -> float:
+    value = parse_float(text)
+    if value is None:
+        raise ValueError(f"{label}를 입력하세요")
+    return value
 
 
 def set_combo_text(combo: QComboBox, value: object, default: str | None = None) -> None:
@@ -2083,14 +2098,11 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addStretch(1)
-        self.excel_button = QPushButton("엑셀 보고서 생성")
-        self.excel_button.clicked.connect(self.generate_excel_report)
-        self.pdf_button = QPushButton("PDF 보고서 생성")
-        self.pdf_button.clicked.connect(self.generate_visual_pdf_report)
-        for button in (self.excel_button, self.pdf_button):
-            button.setObjectName("exportButton")
-            layout.addWidget(button)
-            self.report_controls.append(button)
+        self.report_export_button = QPushButton("보고서 생성")
+        self.report_export_button.clicked.connect(self.open_report_export_dialog)
+        self.report_export_button.setObjectName("exportButton")
+        layout.addWidget(self.report_export_button)
+        self.report_controls.append(self.report_export_button)
         return bar
 
     def _build_video_section_header(self) -> QWidget:
@@ -2617,6 +2629,9 @@ class MainWindow(QMainWindow):
         header_row.setSpacing(8)
         header_row.addWidget(self._build_section_title("• 결함 목록"))
         header_row.addStretch(1)
+        self.state_grade_summary_label = QLabel("구조등급 - / 운영등급 -", self)
+        self.state_grade_summary_label.setObjectName("cardMeta")
+        header_row.addWidget(self.state_grade_summary_label)
         self.delete_defect_button = QPushButton("선택 결함 삭제")
         self.delete_defect_button.setObjectName("dangerButton")
         self.delete_defect_button.clicked.connect(self.delete_selected_defect)
@@ -2676,6 +2691,50 @@ class MainWindow(QMainWindow):
         fit_table_height_to_contents(self.defect_table)
         self.report_controls.append(self.defect_table)
         layout.addWidget(self.defect_table)
+
+        self.unit_state_grade_table = QTableWidget(0, 9, self)
+        self.unit_state_grade_table.setObjectName("defectTable")
+        self.unit_state_grade_table.verticalHeader().hide()
+        self.unit_state_grade_table.setHorizontalHeaderLabels(
+            [
+                "구간",
+                "구간정보",
+                "주행방향",
+                "거리범위(m)",
+                "구조점수",
+                "구조등급",
+                "운영점수",
+                "운영등급",
+                "결함수",
+            ]
+        )
+        configure_table_headers(self.unit_state_grade_table)
+        configure_table_rows(self.unit_state_grade_table, 48)
+        self.unit_state_grade_table.setWordWrap(True)
+        apply_column_widths(
+            self.unit_state_grade_table,
+            {
+                0: 56,
+                1: 360,
+                2: 82,
+                3: 140,
+                4: 76,
+                5: 76,
+                6: 76,
+                7: 76,
+                8: 66,
+            },
+            {1},
+        )
+        self.unit_state_grade_table.setSelectionMode(
+            QTableWidget.SelectionMode.NoSelection
+        )
+        self.unit_state_grade_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        fit_table_height_to_contents(self.unit_state_grade_table)
+        layout.addWidget(self._build_section_title("• 단위구간 상태등급"))
+        layout.addWidget(self.unit_state_grade_table)
         return section
 
     def _register_shortcuts(self) -> None:
@@ -3581,6 +3640,7 @@ class MainWindow(QMainWindow):
                 clear_input_widget(widget)
         self.video_info_table.clearContents()
         self.defect_table.setRowCount(0)
+        self._refresh_unit_state_grades([])
         fit_table_height_to_contents(self.defect_table)
         self.update_summary()
 
@@ -3655,7 +3715,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "저장", "보고서 정보를 저장했습니다")
 
     def update_export_state(self) -> None:
-        if not hasattr(self, "excel_button"):
+        if not hasattr(self, "report_export_button"):
             return
         required_report = [
             "report_number",
@@ -3670,8 +3730,7 @@ class MainWindow(QMainWindow):
         )
         pipe_ok = bool(self.length_input.text().strip() and self.total_drive_input.text().strip())
         enabled = self.current_report_id is not None and report_ok and pipe_ok
-        self.excel_button.setEnabled(enabled)
-        self.pdf_button.setEnabled(enabled)
+        self.report_export_button.setEnabled(enabled)
 
     def load_report_video(self) -> None:
         self._release_video()
@@ -4101,7 +4160,7 @@ class MainWindow(QMainWindow):
                 frame=self.pending_capture_frame,
                 timestamp_ms=self.pending_capture_timestamp_ms,
                 drive_direction=self.defect_drive_direction_combo.currentText(),
-                distance_m=parse_float(self.distance_input.text()),
+                distance_m=parse_required_float(self.distance_input.text(), "거리(m)"),
                 item_category=self.item_category_combo.currentText(),
                 condition_item=condition_item,
                 defect_item=defect_item,
@@ -4110,8 +4169,8 @@ class MainWindow(QMainWindow):
                 manhole_defect_depth_m=parse_float(self.manhole_defect_depth_input.text()),
                 memo=self.memo_input.text().strip() or None,
             )
-        except ValueError:
-            QMessageBox.warning(self, "입력 오류", "숫자 필드 값을 확인하세요")
+        except ValueError as exc:
+            QMessageBox.warning(self, "입력 오류", str(exc))
             return
         except Exception as exc:
             self.logger.exception("Failed to save defect")
@@ -4136,7 +4195,7 @@ class MainWindow(QMainWindow):
                 self.editing_defect_id,
                 {
                     "drive_direction": self.defect_drive_direction_combo.currentText(),
-                    "distance_m": parse_float(self.distance_input.text()),
+                    "distance_m": parse_required_float(self.distance_input.text(), "거리(m)"),
                     "item_category": self.item_category_combo.currentText(),
                     "condition_item": condition_item,
                     "defect_item": defect_item,
@@ -4146,8 +4205,8 @@ class MainWindow(QMainWindow):
                     "memo": self.memo_input.text().strip() or None,
                 },
             )
-        except ValueError:
-            QMessageBox.warning(self, "입력 오류", "숫자 필드 값을 확인하세요")
+        except ValueError as exc:
+            QMessageBox.warning(self, "입력 오류", str(exc))
             return
         self.cancel_defect_edit()
         self.refresh_defects()
@@ -4169,11 +4228,13 @@ class MainWindow(QMainWindow):
     def refresh_defects(self) -> None:
         if self.current_report_id is None:
             self.defect_table.setRowCount(0)
+            self._refresh_unit_state_grades([])
             fit_table_height_to_contents(self.defect_table)
             self.timeline_slider.set_markers([])
             self._refresh_stop_segment_list()
             return
         rows = self.db.list_defects(self.current_report_id)
+        self._refresh_unit_state_grades(rows)
         if self.show_stop_only_checkbox.isChecked():
             self.defect_table.setRowCount(len(self.stop_segments))
             for idx, seg in enumerate(self.stop_segments):
@@ -4228,6 +4289,48 @@ class MainWindow(QMainWindow):
         fit_table_height_to_contents(self.defect_table)
         self._refresh_timeline_markers(rows)
         self._refresh_stop_segment_list()
+
+    def _refresh_unit_state_grades(self, rows) -> None:
+        if not hasattr(self, "unit_state_grade_table"):
+            return
+        summary = compute_pipe_state_grades(rows)
+        self.state_grade_summary_label.setText(
+            (
+                f"구조등급 {format_state_value(summary.structural_grade) or '-'} / "
+                f"운영등급 {format_state_value(summary.operational_grade) or '-'}"
+            )
+        )
+        self.unit_state_grade_table.setRowCount(len(summary.sections))
+        for row_index, section in enumerate(summary.sections):
+            time_range = format_state_time_range(
+                section.start_timestamp_ms, section.end_timestamp_ms
+            )
+            section_label = format_state_section_label(section)
+            section_info = "\n".join(
+                part for part in (time_range, section_label) if part
+            )
+            distance_range = (
+                f"{format_state_distance(section.start_distance_m)}~"
+                f"{format_state_distance(section.end_distance_m)}"
+            )
+            values = [
+                section.index,
+                section_info,
+                section.drive_direction,
+                distance_range,
+                section.structural_score,
+                section.structural_grade,
+                section.operational_score,
+                section.operational_grade,
+                section.defect_count,
+            ]
+            for col, value in enumerate(values):
+                self.unit_state_grade_table.setItem(
+                    row_index,
+                    col,
+                    read_only_table_item(value, row_index=row_index),
+                )
+        fit_table_height_to_contents(self.unit_state_grade_table)
 
     def _clear_stop_segments(self) -> None:
         self.stop_segments = []
@@ -4539,20 +4642,54 @@ class MainWindow(QMainWindow):
             f"의심구간 {len(self.stop_segments)}개와 후보 프레임 {candidate_count}개를 탐지했습니다.",
         )
 
-    def generate_excel_report(self) -> None:
-        if self.current_report_id is None:
-            return
-        self.save_report_details_without_message()
-        context = self.db.get_report_context(self.current_report_id)
-        if context is None:
-            return
-        output_path = self.inspection.storage.excel_report_path(
+    def _excel_report_path_for_context(self, context, output_dir: Path | None = None) -> Path:
+        default_path = self.inspection.storage.excel_report_path(
             context["project_name"],
             context["business_code"],
             context["business_name"],
             context["report_number"],
             context["pipe_number"],
         )
+        if output_dir is None:
+            return default_path
+        return output_dir / default_path.name
+
+    def _default_report_output_dir(self, report_id: int) -> Path | None:
+        context = self.db.get_report_context(report_id)
+        if context is None:
+            return None
+        return self.inspection.storage.pdf_report_dir(
+            context["project_name"],
+            context["business_code"],
+            context["business_name"],
+            context["report_number"],
+            context["pipe_number"],
+        )
+
+    def _selected_output_dir(self, raw_path: str) -> Path | None:
+        if not raw_path.strip():
+            QMessageBox.warning(self, "보고서 생성", "생성 경로를 입력하세요")
+            return None
+        output_dir = Path(raw_path).expanduser()
+        if output_dir.exists() and not output_dir.is_dir():
+            QMessageBox.warning(self, "보고서 생성", "생성 경로가 폴더가 아닙니다")
+            return None
+        return output_dir
+
+    def _open_generated_file(self, file_path: str | Path) -> None:
+        path = Path(file_path).resolve()
+        if not path.exists():
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def generate_excel_report(self, output_dir: Path | None = None) -> None:
+        if self.current_report_id is None:
+            return
+        self.save_report_details_without_message()
+        context = self.db.get_report_context(self.current_report_id)
+        if context is None:
+            return
+        output_path = self._excel_report_path_for_context(context, output_dir)
         if output_path.exists():
             overwrite = QMessageBox.question(
                 self, "덮어쓰기 확인", f"{output_path.name} 파일이 이미 있습니다. 덮어쓰시겠습니까?"
@@ -4560,12 +4697,69 @@ class MainWindow(QMainWindow):
             if overwrite != QMessageBox.StandardButton.Yes:
                 return
         try:
-            report_path = self.inspection.generate_excel_report(self.current_report_id)
+            report_path = self.inspection.generate_excel_report(
+                self.current_report_id, report_path=output_path
+            )
         except Exception as exc:
             self.logger.exception("Excel report generation failed")
             QMessageBox.critical(self, "보고서 오류", str(exc))
             return
         QMessageBox.information(self, "보고서", f"보고서가 생성되었습니다:\n{report_path}")
+        self._open_generated_file(report_path)
+
+    def open_report_export_dialog(self) -> None:
+        if self.current_report_id is None:
+            return
+        report_options = self._pdf_report_options()
+        if not report_options:
+            QMessageBox.warning(self, "보고서 생성", "선택할 수 있는 보고서가 없습니다")
+            return
+        default_output_dir = self._default_report_output_dir(self.current_report_id)
+        context = self.db.get_report_context(self.current_report_id)
+        if default_output_dir is None or context is None:
+            return
+        excel_filename = self._excel_report_path_for_context(context).name
+        dialog = ReportExportDialog(
+            report_options,
+            self.current_report_id,
+            str(default_output_dir),
+            excel_filename,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        output_dir = self._selected_output_dir(dialog.output_dir())
+        if output_dir is None:
+            return
+        if dialog.selected_export_kind() == "excel":
+            self.generate_excel_report(output_dir=output_dir)
+            return
+
+        report_type = dialog.pdf_report_type()
+        if report_type == "comparison":
+            before_report_id = dialog.before_report_id()
+            after_report_id = dialog.after_report_id()
+            if before_report_id == after_report_id:
+                QMessageBox.warning(
+                    self,
+                    "PDF 보고서",
+                    "비교보고서는 보수전과 보수후 보고서를 서로 다르게 선택해야 합니다.",
+                )
+                return
+            self.generate_visual_pdf_report(
+                report_type=report_type,
+                before_report_id=before_report_id,
+                after_report_id=after_report_id,
+                output_dir=output_dir,
+            )
+            return
+
+        self.generate_visual_pdf_report(
+            report_type=report_type,
+            before_report_id=self.current_report_id,
+            after_report_id=None,
+            output_dir=output_dir,
+        )
 
     def save_report_details_without_message(self) -> None:
         if self.current_report_id is None:
@@ -4611,14 +4805,10 @@ class MainWindow(QMainWindow):
             return str(workspace_pipe)
         return None
 
-    def _choose_pdf_after_report_id(self) -> tuple[bool, int | None]:
-        if self.current_report_id is None:
-            return False, None
-        options: list[tuple[int | None, str]] = [(None, "After 없이 생성")]
+    def _pdf_report_options(self) -> list[tuple[int, str]]:
+        options: list[tuple[int, str]] = []
         for row in self.db.list_report_contexts():
             report_id = int(row["id"])
-            if report_id == self.current_report_id:
-                continue
             options.append(
                 (
                     report_id,
@@ -4629,10 +4819,7 @@ class MainWindow(QMainWindow):
                     ),
                 )
             )
-        dialog = AfterReportDialog(options, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return False, None
-        return True, dialog.selected_report_id()
+        return options
 
     @staticmethod
     def _merge_row_value(row, field: str) -> object:
@@ -4695,7 +4882,7 @@ class MainWindow(QMainWindow):
             after_value = after_snapshot.get(label, "")
             if before_value != after_value:
                 mismatches.append(
-                    f"{label}: 현재='{before_value or '-'}', After='{after_value or '-'}'"
+                    f"{label}: 보수전='{before_value or '-'}', 보수후='{after_value or '-'}'"
                 )
         return mismatches
 
@@ -4708,24 +4895,37 @@ class MainWindow(QMainWindow):
             defects.append(
                 {
                     "distance_m": distance_m,
+                    "drive_direction": row["drive_direction"] or "",
+                    "item_category": row["item_category"] or "",
                     "grade": row["grade"] or "",
                     "image_path": row["image_path"],
                     "condition_item": row["condition_item"] or "",
                     "defect_item": row["defect_item"] or "",
+                    "timestamp_ms": int(row["timestamp_ms"]),
                 }
             )
         return defects, max_distance_m
 
-    def generate_visual_pdf_report(self) -> None:
+    def generate_visual_pdf_report(
+        self,
+        report_type: str = "inspection",
+        before_report_id: int | None = None,
+        after_report_id: int | None = None,
+        output_dir: Path | None = None,
+    ) -> None:
         if self.current_report_id is None:
             return
         self.save_report_details_without_message()
-        accepted, after_report_id = self._choose_pdf_after_report_id()
-        if not accepted:
+        if before_report_id is None:
+            before_report_id = self.current_report_id
+        is_comparison = report_type == "comparison"
+        if is_comparison and after_report_id is None:
+            QMessageBox.warning(self, "PDF 보고서", "비교할 보수후 보고서를 선택하세요.")
             return
-        if after_report_id is not None:
+
+        if is_comparison and after_report_id is not None:
             mismatches = self._pdf_after_report_mismatches(
-                self.current_report_id, after_report_id
+                before_report_id, after_report_id
             )
             if mismatches:
                 mismatch_preview = "\n".join(f"- {item}" for item in mismatches[:12])
@@ -4735,26 +4935,26 @@ class MainWindow(QMainWindow):
                     self,
                     "PDF 보고서",
                     (
-                        "After 보고서의 기본 정보가 현재 보고서와 달라 병합 PDF를 생성할 수 없습니다.\n\n"
+                        "보수후 보고서의 기본 정보가 보수전 보고서와 달라 비교 PDF를 생성할 수 없습니다.\n\n"
                         f"{mismatch_preview}"
                     ),
                 )
                 return
-        context = self.db.get_report_context(self.current_report_id)
-        pipe_info = self.db.get_pipe_information(self.current_report_id)
+        context = self.db.get_report_context(before_report_id)
+        pipe_info = self.db.get_pipe_information(before_report_id)
         if context is None or pipe_info is None:
             return
-        upstream = self.db.get_manhole(self.current_report_id, "upstream")
-        downstream = self.db.get_manhole(self.current_report_id, "downstream")
-        actual = self.db.get_actual_survey(self.current_report_id)
+        upstream = self.db.get_manhole(before_report_id, "upstream")
+        downstream = self.db.get_manhole(before_report_id, "downstream")
+        actual = self.db.get_actual_survey(before_report_id)
         pipe_png_path = self._resolve_default_pipe_png_path()
         if pipe_png_path is None:
             QMessageBox.warning(self, "PDF 보고서", "pipe.png 템플릿 파일을 찾을 수 없습니다")
             return
         defects_before, before_max_distance_m = self._pdf_defect_payload(
-            self.current_report_id
+            before_report_id
         )
-        if after_report_id is None:
+        if not is_comparison or after_report_id is None:
             defects_after: list[dict] = []
             after_max_distance_m = 0.0
         else:
@@ -4762,13 +4962,14 @@ class MainWindow(QMainWindow):
                 after_report_id
             )
         max_distance_m = max(before_max_distance_m, after_max_distance_m)
-        output_dir = self.inspection.storage.pdf_report_dir(
-            context["project_name"],
-            context["business_code"],
-            context["business_name"],
-            context["report_number"],
-            context["pipe_number"],
-        )
+        if output_dir is None:
+            output_dir = self.inspection.storage.pdf_report_dir(
+                context["project_name"],
+                context["business_code"],
+                context["business_name"],
+                context["report_number"],
+                context["pipe_number"],
+            )
         try:
             pipe_length = float(pipe_info["length_m"] or 0.0)
             if pipe_length <= 0 and max_distance_m > 0:
@@ -4782,6 +4983,7 @@ class MainWindow(QMainWindow):
                 defects_before=defects_before,
                 defects_after=defects_after,
                 output_path=str(output_dir),
+                report_type=report_type,
                 report_context=context,
                 pipe_info=pipe_info,
                 upstream_manhole=upstream,
@@ -4793,6 +4995,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "PDF 보고서 오류", str(exc))
             return
         QMessageBox.information(self, "PDF 보고서", f"PDF 보고서가 생성되었습니다:\n{pdf_path}")
+        self._open_generated_file(pdf_path)
 
 
 class LeftNavigationPanel(QWidget):

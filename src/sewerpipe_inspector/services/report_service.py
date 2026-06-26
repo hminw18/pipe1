@@ -9,6 +9,14 @@ from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from sewerpipe_inspector.state_grading import (
+    compute_pipe_state_grades,
+    format_state_distance,
+    format_state_section_label,
+    format_state_time_range,
+    format_state_value,
+)
+
 
 GRADE_FILL = {
     "대": PatternFill(fill_type="solid", fgColor="FF7F7F"),
@@ -334,3 +342,68 @@ class ReportService:
                 image.height = 68
                 ws.add_image(image, f"L{row_index}")
                 ws.row_dimensions[row_index].height = 54
+
+        self._append_state_grade_table(ws, len(defects) + 4, defects)
+
+    def _append_state_grade_table(
+        self, ws, row_index: int, defects: list[DefectReportRow]
+    ) -> None:
+        summary = compute_pipe_state_grades(defects)
+        ws.cell(row=row_index, column=1, value="단위구간 상태등급")
+        ws.merge_cells(start_row=row_index, start_column=1, end_row=row_index, end_column=9)
+        title_cell = ws.cell(row=row_index, column=1)
+        title_cell.font = Font(bold=True, size=13)
+        title_cell.fill = HEADER_FILL
+        title_cell.alignment = Alignment(horizontal="center")
+
+        row_index += 1
+        ws.cell(row=row_index, column=1, value="전체 구조등급")
+        ws.cell(row=row_index, column=2, value=format_state_value(summary.structural_grade))
+        ws.cell(row=row_index, column=3, value="전체 운영등급")
+        ws.cell(row=row_index, column=4, value=format_state_value(summary.operational_grade))
+        for col in (1, 3):
+            ws.cell(row=row_index, column=col).fill = LABEL_FILL
+            ws.cell(row=row_index, column=col).font = Font(bold=True)
+
+        row_index += 2
+        headers = [
+            "구간",
+            "구간정보",
+            "주행방향",
+            "거리범위(m)",
+            "구조점수",
+            "구조등급",
+            "운영점수",
+            "운영등급",
+            "결함수",
+        ]
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=row_index, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = HEADER_FILL
+
+        for offset, section in enumerate(summary.sections, start=1):
+            time_range = format_state_time_range(
+                section.start_timestamp_ms, section.end_timestamp_ms
+            )
+            section_label = format_state_section_label(section)
+            section_info = " / ".join(
+                part for part in (time_range, section_label) if part
+            )
+            distance_range = (
+                f"{format_state_distance(section.start_distance_m)}~"
+                f"{format_state_distance(section.end_distance_m)}"
+            )
+            values = [
+                section.index,
+                section_info,
+                section.drive_direction,
+                distance_range,
+                section.structural_score,
+                section.structural_grade,
+                section.operational_score,
+                section.operational_grade,
+                section.defect_count,
+            ]
+            for col, value in enumerate(values, start=1):
+                ws.cell(row=row_index + offset, column=col, value=value)

@@ -26,6 +26,14 @@ from reportlab.platypus import (
 )
 
 from sewerpipe_inspector.fonts import find_app_report_font_paths
+from sewerpipe_inspector.state_grading import (
+    StateGradeSummary,
+    compute_pipe_state_grades,
+    format_state_distance,
+    format_state_section_label,
+    format_state_time_range,
+    format_state_value,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,6 +165,7 @@ class DefectItem:
     image_path: str
     condition_item: str
     defect_item: str
+    timestamp_ms: int | None = None
 
 
 @dataclass
@@ -192,6 +201,7 @@ class PipeVisualBodyFlowable(Flowable):
         template_config: PipeTemplateConfig,
         normal_font: str,
         bold_font: str,
+        is_comparison: bool,
     ) -> None:
         super().__init__()
         self.width = width
@@ -205,11 +215,12 @@ class PipeVisualBodyFlowable(Flowable):
         self.template_config = template_config
         self.normal_font = normal_font
         self.bold_font = bold_font
+        self.is_comparison = is_comparison
         self._origin_x = 0.0
         self._origin_y = 0.0
 
         self.column_gap = 6 * mm
-        self.title_height = 8 * mm
+        self.title_height = 8 * mm if self.is_comparison else 0.0
         self.meta_line_height = 5 * mm
         self.block_gap = 0.2 * mm
         self.placeholder_height = 28 * mm
@@ -261,9 +272,9 @@ class PipeVisualBodyFlowable(Flowable):
         return super().drawOn(canv, x, y)
 
     def draw(self) -> None:
-        self._draw_column_title("BEFORE", self.left_x, self.side_width)
-        self._draw_column_title("PIPE VISUAL", self.center_x, self.center_width)
-        self._draw_column_title("AFTER", self.right_x, self.side_width)
+        if self.is_comparison:
+            self._draw_column_title("보수전", self.left_x, self.side_width)
+            self._draw_column_title("보수후", self.right_x, self.side_width)
 
         pipe_bounds = self._draw_pipe_visual()
         self._draw_defect_side(
@@ -304,7 +315,7 @@ class PipeVisualBodyFlowable(Flowable):
             img.drawOn(self.canv, draw_x, draw_y)
 
             center_text = Paragraph(
-                f"<b>Total Length</b><br/><b>{self.pipe_length_m:.2f} m</b>",
+                f"<b>연장</b><br/><b>{self.pipe_length_m:.2f} m</b>",
                 ParagraphStyle(
                     "pipe-center-text",
                     parent=self.small_style,
@@ -390,6 +401,7 @@ class PipeVisualBodyFlowable(Flowable):
             caption_y = max(content_bottom + 1.0, caption_y)
             grade_color = GRADE_COLOR.get(layout.item.grade, colors.black)
             caption = (
+                f"{_format_mmss(layout.item.timestamp_ms)} | "
                 f"{layout.item.distance_m:.2f}m | {layout.item.condition_item} | "
                 f"{layout.item.defect_item} | {layout.item.grade}"
             )
@@ -469,6 +481,11 @@ class PipeVisualBodyFlowable(Flowable):
         self.canv.line(elbow_x, pipe_point_y, elbow_x, end_y)
         self.canv.line(elbow_x, end_y, end_x, end_y)
 
+        label_x = (elbow_x + end_x) / 2.0
+        self.canv.setFont(self.normal_font, 7.0)
+        self.canv.setFillColor(colors.HexColor("#263F66"))
+        self.canv.drawCentredString(label_x, end_y - 8.0, f"{defect.distance_m:.2f}m")
+
         arrow_size = 3.2
         if side == "before":
             self.canv.line(end_x, end_y, end_x - arrow_size, end_y + arrow_size * 0.6)
@@ -510,7 +527,19 @@ def _to_defect_item(raw: dict) -> DefectItem:
         image_path=str(raw.get("image_path", "")),
         condition_item=str(raw.get("condition_item") or raw.get("defect_type") or ""),
         defect_item=str(raw.get("defect_item") or raw.get("memo") or ""),
+        timestamp_ms=(
+            None if raw.get("timestamp_ms") is None else int(raw.get("timestamp_ms", 0))
+        ),
     )
+
+
+def _format_mmss(timestamp_ms: int | None) -> str:
+    if timestamp_ms is None:
+        return "00:00"
+    seconds = max(0, int(timestamp_ms) // 1000)
+    minutes = seconds // 60
+    secs = seconds % 60
+    return f"{minutes:02d}:{secs:02d}"
 
 
 def _safe_image_size(image_path: str) -> tuple[float, float]:
@@ -572,6 +601,118 @@ def _paginate_defect_layouts(
             )
 
         pages.append(page_layouts)
+
+    return pages
+
+
+def _layout_defect_block(
+    item: DefectItem,
+    slot_index: int,
+    slot_height: float,
+    column_width: float,
+) -> DefectBlockLayout:
+    caption_height = 10.0
+    block_gap = 0.2 * mm
+    text_height = caption_height
+    max_image_width = min(240 * mm, column_width)
+    slot_image_max_h = max(8 * mm, slot_height - text_height - block_gap - (2 * mm))
+    src_w, src_h = _safe_image_size(item.image_path)
+    aspect = src_h / src_w
+    fit_by_height_w = slot_image_max_h / max(aspect, 0.01)
+    image_width = max(10 * mm, min(max_image_width, fit_by_height_w * 2.0))
+    image_height = image_width * aspect
+    block_height = image_height + text_height + block_gap
+    slot_top = slot_index * slot_height
+    top_offset = slot_top + max(0.0, (slot_height - block_height) / 2.0)
+    return DefectBlockLayout(
+        item=item,
+        top_offset=top_offset,
+        image_width=image_width,
+        image_height=image_height,
+        block_height=block_height,
+    )
+
+
+def _paginate_single_alternating_layouts(
+    defects: list[DefectItem],
+    column_width: float,
+    content_height: float,
+) -> list[tuple[list[DefectBlockLayout], list[DefectBlockLayout]]]:
+    if not defects:
+        return [([], [])]
+
+    max_rows_per_page = 4
+    max_items_per_page = max_rows_per_page * 2
+    slot_height = content_height / max_rows_per_page
+    ordered = sorted(defects, key=lambda d: d.distance_m)
+    pages: list[tuple[list[DefectBlockLayout], list[DefectBlockLayout]]] = []
+
+    for page_start in range(0, len(ordered), max_items_per_page):
+        chunk = ordered[page_start : page_start + max_items_per_page]
+        left_blocks: list[DefectBlockLayout] = []
+        right_blocks: list[DefectBlockLayout] = []
+        for idx, item in enumerate(chunk):
+            slot_index = idx // 2
+            layout = _layout_defect_block(item, slot_index, slot_height, column_width)
+            if idx % 2 == 0:
+                left_blocks.append(layout)
+            else:
+                right_blocks.append(layout)
+        pages.append((left_blocks, right_blocks))
+
+    return pages
+
+
+def _paginate_comparison_layouts(
+    before_items: list[DefectItem],
+    after_items: list[DefectItem],
+    column_width: float,
+    content_height: float,
+) -> list[tuple[list[DefectBlockLayout], list[DefectBlockLayout]]]:
+    if not before_items and not after_items:
+        return [([], [])]
+
+    grouped: dict[float, tuple[list[DefectItem], list[DefectItem]]] = {}
+    for item in sorted(before_items, key=lambda d: d.distance_m):
+        key = round(item.distance_m, 2)
+        grouped.setdefault(key, ([], []))[0].append(item)
+    for item in sorted(after_items, key=lambda d: d.distance_m):
+        key = round(item.distance_m, 2)
+        grouped.setdefault(key, ([], []))[1].append(item)
+
+    rows: list[tuple[DefectItem | None, DefectItem | None]] = []
+    for distance in sorted(grouped):
+        before_group, after_group = grouped[distance]
+        max_count = max(len(before_group), len(after_group))
+        for idx in range(max_count):
+            rows.append(
+                (
+                    before_group[idx] if idx < len(before_group) else None,
+                    after_group[idx] if idx < len(after_group) else None,
+                )
+            )
+
+    max_rows_per_page = 4
+    slot_height = content_height / max_rows_per_page
+    pages: list[tuple[list[DefectBlockLayout], list[DefectBlockLayout]]] = []
+    for page_start in range(0, len(rows), max_rows_per_page):
+        chunk = rows[page_start : page_start + max_rows_per_page]
+        before_blocks: list[DefectBlockLayout] = []
+        after_blocks: list[DefectBlockLayout] = []
+        for slot_index, (before_item, after_item) in enumerate(chunk):
+            if before_item is not None:
+                before_blocks.append(
+                    _layout_defect_block(
+                        before_item, slot_index, slot_height, column_width
+                    )
+                )
+            if after_item is not None:
+                after_blocks.append(
+                    _layout_defect_block(
+                        after_item, slot_index, slot_height, column_width
+                    )
+                )
+        pages.append((before_blocks, after_blocks))
 
     return pages
 
@@ -1056,6 +1197,121 @@ def generate_header_table(data: Mapping[str, object]) -> Table:
     return table
 
 
+def _make_state_grade_table(
+    title: str,
+    summary: StateGradeSummary,
+    doc_width: float,
+    normal_font: str,
+    bold_font: str,
+) -> list:
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        f"state-title-{title}",
+        parent=styles["Heading4"],
+        fontName=bold_font,
+        fontSize=11,
+        leading=14,
+        spaceAfter=4,
+    )
+    cell_style = ParagraphStyle(
+        f"state-cell-{title}",
+        parent=styles["Normal"],
+        fontName=normal_font,
+        fontSize=7.2,
+        leading=8.5,
+        alignment=1,
+        wordWrap="CJK",
+    )
+    header_style = ParagraphStyle(
+        f"state-header-{title}",
+        parent=cell_style,
+        fontName=bold_font,
+    )
+
+    flowables = [
+        Paragraph(title, title_style),
+        Table(
+            [
+                [
+                    Paragraph("전체 구조등급", header_style),
+                    Paragraph(format_state_value(summary.structural_grade), cell_style),
+                    Paragraph("전체 운영등급", header_style),
+                    Paragraph(format_state_value(summary.operational_grade), cell_style),
+                ]
+            ],
+            colWidths=[doc_width * 0.18, doc_width * 0.18, doc_width * 0.18, doc_width * 0.18],
+        ),
+        Spacer(1, 3 * mm),
+    ]
+
+    headers = [
+        "구간",
+        "구간정보",
+        "주행방향",
+        "거리범위(m)",
+        "구조점수",
+        "구조등급",
+        "운영점수",
+        "운영등급",
+        "결함수",
+    ]
+    rows = [[Paragraph(header, header_style) for header in headers]]
+    for section in summary.sections:
+        time_range = format_state_time_range(
+            section.start_timestamp_ms, section.end_timestamp_ms
+        )
+        section_label = format_state_section_label(section)
+        section_info = "<br/>".join(
+            part for part in (time_range, section_label) if part
+        )
+        distance_range = (
+            f"{format_state_distance(section.start_distance_m)}~"
+            f"{format_state_distance(section.end_distance_m)}"
+        )
+        rows.append(
+            [
+                Paragraph(str(section.index), cell_style),
+                Paragraph(section_info, cell_style),
+                Paragraph(section.drive_direction, cell_style),
+                Paragraph(distance_range, cell_style),
+                Paragraph(str(section.structural_score), cell_style),
+                Paragraph(str(section.structural_grade), cell_style),
+                Paragraph(str(section.operational_score), cell_style),
+                Paragraph(str(section.operational_grade), cell_style),
+                Paragraph(str(section.defect_count), cell_style),
+            ]
+        )
+
+    table = Table(
+        rows,
+        colWidths=[
+            doc_width * 0.07,
+            doc_width * 0.27,
+            doc_width * 0.10,
+            doc_width * 0.14,
+            doc_width * 0.09,
+            doc_width * 0.09,
+            doc_width * 0.09,
+            doc_width * 0.09,
+            doc_width * 0.06,
+        ],
+        repeatRows=1,
+    )
+    table.setStyle(
+        [
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#8F8F8F")),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9D9D9")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 2),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]
+    )
+    flowables.append(table)
+    return flowables
+
+
 def _draw_page_footer(canvas, _doc) -> None:
     canvas.saveState()
     canvas.setFont("Helvetica", 9)
@@ -1073,6 +1329,7 @@ def generate_pipe_pdf_report(
     defects_before: list[dict],
     defects_after: list[dict],
     output_path: str,
+    report_type: str = "inspection",
     report_context: Mapping[str, object] | None = None,
     pipe_info: Mapping[str, object] | None = None,
     upstream_manhole: Mapping[str, object] | None = None,
@@ -1081,7 +1338,19 @@ def generate_pipe_pdf_report(
 ) -> str:
     output_dir = Path(output_path)
     output_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = output_dir / f"{pipe_code}_InspectionVisualReport.pdf"
+    report_type = report_type if report_type in {"inspection", "post_repair", "comparison"} else "inspection"
+    filename_suffix = {
+        "inspection": "InspectionVisualReport",
+        "post_repair": "PostRepairVisualReport",
+        "comparison": "ComparisonVisualReport",
+    }[report_type]
+    report_title = {
+        "inspection": "하수관거 조사 보고서",
+        "post_repair": "하수관거 보수후 보고서",
+        "comparison": "하수관거 보수 비교 보고서",
+    }[report_type]
+    is_comparison = report_type == "comparison"
+    pdf_path = output_dir / f"{pipe_code}_{filename_suffix}.pdf"
 
     doc = SimpleDocTemplate(
         str(pdf_path),
@@ -1092,6 +1361,8 @@ def generate_pipe_pdf_report(
         bottomMargin=PAGE_MARGIN_PT,
     )
 
+    before_state_summary = compute_pipe_state_grades(defects_before)
+    after_state_summary = compute_pipe_state_grades(defects_after)
     before_items = [_to_defect_item(item) for item in defects_before]
     after_items = [_to_defect_item(item) for item in defects_after]
     template_config = _load_template_config(pipe_png_path)
@@ -1108,6 +1379,12 @@ def generate_pipe_pdf_report(
         downstream_manhole=downstream_manhole,
         actual_survey=actual_survey,
     )
+    header_data["pipe_structural_grade"] = format_state_value(
+        before_state_summary.structural_grade
+    )
+    header_data["pipe_operational_grade"] = format_state_value(
+        before_state_summary.operational_grade
+    )
     header_table_sample = generate_header_table(header_data)
     _w, header_table_height = header_table_sample.wrap(doc.width, doc.height)
     title_style = ParagraphStyle(
@@ -1117,7 +1394,7 @@ def generate_pipe_pdf_report(
         leading=24,
         alignment=1,
     )
-    title_sample = Paragraph("하수관거 보수 조사 보고서", title_style)
+    title_sample = Paragraph(report_title, title_style)
     _tw, title_height = title_sample.wrap(doc.width, doc.height)
     title_gap = 7.5
     body_top_spacer = 4 * mm
@@ -1129,29 +1406,27 @@ def generate_pipe_pdf_report(
     column_gap = 6 * mm
     center_width = doc.width * template_config.center_width_ratio
     side_width = (doc.width - center_width - (2 * column_gap)) / 2.0
-    content_height = visual_height - (8 * mm)
+    content_height = visual_height - ((8 * mm) if is_comparison else 0.0)
 
-    before_pages = _paginate_defect_layouts(
-        defects=before_items,
-        column_width=side_width,
-        content_height=content_height,
-        _pipe_length_m=pipe_length_m,
-    )
-    after_pages = _paginate_defect_layouts(
-        defects=after_items,
-        column_width=side_width,
-        content_height=content_height,
-        _pipe_length_m=pipe_length_m,
-    )
+    if is_comparison:
+        visual_pages = _paginate_comparison_layouts(
+            before_items=before_items,
+            after_items=after_items,
+            column_width=side_width,
+            content_height=content_height,
+        )
+    else:
+        visual_pages = _paginate_single_alternating_layouts(
+            defects=before_items + after_items,
+            column_width=side_width,
+            content_height=content_height,
+        )
 
-    total_pages = max(len(before_pages), len(after_pages), 1)
+    total_pages = max(len(visual_pages), 1)
     story = []
 
     for page_index in range(total_pages):
-        before_blocks = (
-            before_pages[page_index] if page_index < len(before_pages) else []
-        )
-        after_blocks = after_pages[page_index] if page_index < len(after_pages) else []
+        before_blocks, after_blocks = visual_pages[page_index]
 
         body = PipeVisualBodyFlowable(
             width=doc.width,
@@ -1161,21 +1436,22 @@ def generate_pipe_pdf_report(
             before_blocks=before_blocks,
             after_blocks=after_blocks,
             before_empty_message=(
-                "No defects before repair"
-                if not before_items and page_index == 0
+                "결함 사진 없음"
+                if not before_items and not after_items and page_index == 0
                 else None
             ),
             after_empty_message=(
-                "No defects after repair"
-                if not after_items and page_index == 0
+                "결함 사진 없음"
+                if is_comparison and not after_items and page_index == 0
                 else None
             ),
             template_config=template_config,
             normal_font=normal_font,
             bold_font=bold_font,
+            is_comparison=is_comparison,
         )
         section = []
-        section.append(Paragraph("하수관거 보수 조사 보고서", title_style))
+        section.append(Paragraph(report_title, title_style))
         section.append(Spacer(1, title_gap))
         section.append(generate_header_table(header_data))
         section.append(Spacer(1, body_top_spacer))
@@ -1184,6 +1460,31 @@ def generate_pipe_pdf_report(
 
         if page_index < total_pages - 1:
             story.append(PageBreak())
+
+    if before_state_summary.sections or after_state_summary.sections:
+        story.append(PageBreak())
+        if before_state_summary.sections:
+            story.extend(
+                _make_state_grade_table(
+                    "단위구간 상태등급" if not is_comparison else "보수전 단위구간 상태등급",
+                    before_state_summary,
+                    doc.width,
+                    normal_font,
+                    bold_font,
+                )
+            )
+        if is_comparison and after_state_summary.sections:
+            if before_state_summary.sections:
+                story.append(Spacer(1, 8 * mm))
+            story.extend(
+                _make_state_grade_table(
+                    "보수후 단위구간 상태등급",
+                    after_state_summary,
+                    doc.width,
+                    normal_font,
+                    bold_font,
+                )
+            )
 
     doc.build(story, onFirstPage=_draw_page_footer, onLaterPages=_draw_page_footer)
     return str(pdf_path)
