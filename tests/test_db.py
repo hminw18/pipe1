@@ -1,5 +1,6 @@
 import sqlite3
 import shutil
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,49 @@ def _make_report(db: Database) -> int:
         project_id, "B001", "사업1", "Client", "2026-01-01", "2026-12-31"
     )
     return db.create_report(business_id, "R001", "PIPE-001")
+
+
+def test_database_closes_connections_for_reads_and_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[sqlite3.Connection] = []
+    closed: set[int] = set()
+    original_connect = db_module.sqlite3.connect
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            closed.add(id(self))
+            super().close()
+
+    def tracking_connect(*args, **kwargs) -> sqlite3.Connection:
+        kwargs.setdefault("factory", TrackingConnection)
+        conn = original_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    def assert_all_opened_connections_closed() -> None:
+        assert opened
+        assert all(id(conn) in closed for conn in opened)
+
+    monkeypatch.setattr(db_module.sqlite3, "connect", tracking_connect)
+
+    db = Database(tmp_path / "app.db")
+    assert_all_opened_connections_closed()
+
+    db.fetchall("SELECT 1")
+    assert_all_opened_connections_closed()
+
+    db.fetchone("SELECT 1")
+    assert_all_opened_connections_closed()
+
+    db.create_project("P1")
+    assert_all_opened_connections_closed()
+
+    with pytest.raises(RuntimeError, match="rollback"):
+        with db.transaction() as conn:
+            conn.execute("INSERT INTO inspection_projects(project_name) VALUES ('P2')")
+            raise RuntimeError("rollback")
+    assert_all_opened_connections_closed()
 
 
 def test_foreign_key_cascade_on_report_delete(tmp_path: Path) -> None:
@@ -136,7 +180,7 @@ def test_defect_distance_is_required_by_schema(tmp_path: Path) -> None:
 
 def test_old_grade_not_null_schema_is_migrated(tmp_path: Path) -> None:
     db_path = tmp_path / "old.db"
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.executescript(
             """
             PRAGMA foreign_keys = ON;
@@ -203,6 +247,7 @@ def test_old_grade_not_null_schema_is_migrated(tmp_path: Path) -> None:
             );
             """
         )
+        conn.commit()
 
     db = Database(db_path)
     grade_column = next(
@@ -447,7 +492,7 @@ def test_delete_report_version_reassigns_group_when_root_version_is_deleted(
 
 def test_existing_duplicate_business_and_report_numbers_are_migrated(tmp_path: Path) -> None:
     db_path = tmp_path / "old_duplicates.db"
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         conn.executescript(
             """
             PRAGMA foreign_keys = ON;
@@ -476,6 +521,7 @@ def test_existing_duplicate_business_and_report_numbers_are_migrated(tmp_path: P
                 VALUES (1, 1, 'R001', 'PIPE-001'), (2, 1, 'R001', 'PIPE-002');
             """
         )
+        conn.commit()
 
     db = Database(db_path)
 
