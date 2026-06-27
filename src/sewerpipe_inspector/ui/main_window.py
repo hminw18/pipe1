@@ -35,6 +35,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -636,6 +637,13 @@ REPORT_INFO_TABLE_ROWS = [
     ],
 ]
 
+REPORT_EXPORT_REQUIRED_FIELDS = [
+    ("report_number", "보고서번호"),
+    ("pipe_number", "관로번호"),
+    ("survey_date", "조사일자"),
+    ("buried_years", "매설년수"),
+]
+
 CONTEXT_MERGE_LABELS = [
     ("project_name", "프로젝트명"),
     ("business_code", "사업코드"),
@@ -1203,6 +1211,8 @@ class PopupTablePickerButton(QPushButton):
         self._rows: list[list[object]] = []
         self._grid_columns = 0
         self._allow_empty = False
+        self._popup: QFrame | None = None
+        self._popup_table: QTableWidget | None = None
         self.setMinimumHeight(28)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.clicked.connect(self._show_popup)
@@ -1253,16 +1263,29 @@ class PopupTablePickerButton(QPushButton):
     def _show_popup(self) -> None:
         if not self._rows:
             return
+        if self._popup is not None and self._popup.isVisible():
+            self._popup.raise_()
+            if self._popup_table is not None:
+                self._popup_table.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
         popup = QFrame(self, Qt.WindowType.Popup)
         popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        popup.destroyed.connect(self._clear_popup_refs)
         layout = QVBoxLayout(popup)
         layout.setContentsMargins(0, 0, 0, 0)
         table = QTableWidget(popup)
         table.verticalHeader().hide()
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectItems
+            if self._grid_columns
+            else QTableWidget.SelectionBehavior.SelectRows
+        )
         table.setWordWrap(True)
         table.setShowGrid(True)
+        table.installEventFilter(self)
+        table.viewport().installEventFilter(self)
         if self._grid_columns:
             self._populate_grid_popup(table)
         else:
@@ -1277,7 +1300,48 @@ class PopupTablePickerButton(QPushButton):
         table.setFixedSize(popup_size)
         popup.setFixedSize(popup_size)
         popup.move(popup_pos)
+        self._popup = popup
+        self._popup_table = table
         popup.show()
+        table.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _clear_popup_refs(self, *_args) -> None:
+        self._popup = None
+        self._popup_table = None
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Space,
+        ):
+            self._show_popup()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and self._popup_table is not None
+            and obj in (self._popup_table, self._popup_table.viewport())
+        ):
+            key = event.key()
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                return self._select_current_popup_value(move_focus=None)
+            if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                forward = key == Qt.Key.Key_Tab and not (
+                    event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                )
+                return self._select_current_popup_value(move_focus=forward)
+            if key == Qt.Key.Key_Escape and self._popup is not None:
+                self._popup.close()
+                return True
+        return super().eventFilter(obj, event)
 
     def _bounded_popup_geometry(self, desired_size: QSize) -> tuple[QPoint, QSize]:
         margin = 8
@@ -1378,15 +1442,39 @@ class PopupTablePickerButton(QPushButton):
 
     def _select_popup_value(
         self, table: QTableWidget, popup: QFrame, row: int, col: int
-    ) -> None:
+    ) -> bool:
         item = table.item(row, col)
         if item is None:
-            return
+            return False
         value = item.data(Qt.ItemDataRole.UserRole)
         if value is None:
-            return
+            return False
         self.setCurrentText(value)
         popup.close()
+        return True
+
+    def _select_current_popup_value(self, move_focus: bool | None) -> bool:
+        if self._popup_table is None or self._popup is None:
+            return False
+        row = self._popup_table.currentRow()
+        col = max(0, self._popup_table.currentColumn())
+        if row < 0:
+            return False
+        if not self._select_popup_value(self._popup_table, self._popup, row, col):
+            return False
+        if move_focus is not None:
+            window = self.window()
+            focus_relative = getattr(window, "_focus_report_detail_relative_to", None)
+            if callable(focus_relative):
+                QTimer.singleShot(
+                    0, lambda forward=move_focus: focus_relative(self, forward)
+                )
+            else:
+                QTimer.singleShot(
+                    0,
+                    lambda forward=move_focus: window.focusNextPrevChild(forward),
+                )
+        return True
 
 
 def configure_table_headers(table: QTableWidget) -> None:
@@ -1398,6 +1486,7 @@ def configure_table_headers(table: QTableWidget) -> None:
 
 def configure_table_rows(table: QTableWidget, row_height: int = 38) -> None:
     table.verticalHeader().setDefaultSectionSize(row_height)
+    table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     table.setWordWrap(False)
     table.setShowGrid(True)
     table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1568,6 +1657,7 @@ class MainWindow(QMainWindow):
         }
         self.report_controls: list[QWidget] = []
         self.video_drop_targets: list[QWidget] = []
+        self._shortcuts: list[QShortcut] = []
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._play_tick)
@@ -1584,8 +1674,10 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+            app.focusChanged.connect(self._update_shortcut_enabled_state)
         self.refresh_tree()
         self._set_report_controls_enabled(False)
+        self._update_shortcut_enabled_state()
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -1741,7 +1833,7 @@ class MainWindow(QMainWindow):
         self.video_label = StableImageLabel("", self)
         self.video_label.setObjectName("videoLabel")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.video_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.video_label.setFixedSize(VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT)
         self.video_label.setMouseTracking(True)
         self._install_video_drop_target(self.video_label)
@@ -2698,7 +2790,13 @@ class MainWindow(QMainWindow):
 
     def _configure_report_detail_tab_order(self) -> None:
         widgets = self._report_detail_tab_widgets()
+        self._report_detail_tab_sequence = widgets
+        self._report_detail_tab_index = {
+            widget: index for index, widget in enumerate(widgets)
+        }
+        self._tab_popup_combos: list[QComboBox] = []
         for widget in widgets:
+            widget.installEventFilter(self)
             if isinstance(widget, (QComboBox, PopupTablePickerButton)):
                 self._install_tab_focus_popup(widget)
         for previous, current in zip(widgets, widgets[1:]):
@@ -2736,16 +2834,16 @@ class MainWindow(QMainWindow):
                 self.quadrant_combo,
                 self.manhole_defect_depth_input,
                 self.memo_input,
-                self.save_defect_button,
-                self.edit_defect_button,
-                self.cancel_defect_edit_button,
             ]
         )
         return widgets
 
     def _install_tab_focus_popup(self, widget: QWidget) -> None:
         widget.setProperty("openPopupOnTabFocus", True)
-        widget.installEventFilter(self)
+        if isinstance(widget, QComboBox):
+            self._tab_popup_combos.append(widget)
+            widget.view().installEventFilter(self)
+            widget.view().viewport().installEventFilter(self)
 
     def _defect_category_changed(self, _category: str) -> None:
         self._refresh_defect_taxonomy_controls()
@@ -3019,6 +3117,12 @@ class MainWindow(QMainWindow):
                 lambda cb=callback: self._run_shortcut_if_allowed(cb)
             )
             self._shortcuts.append(shortcut)
+        self._update_shortcut_enabled_state()
+
+    def _update_shortcut_enabled_state(self, *_args) -> None:
+        enabled = not self._is_typing_in_textbox()
+        for shortcut in self._shortcuts:
+            shortcut.setEnabled(enabled)
 
     def _run_shortcut_if_allowed(self, callback) -> None:
         if self._is_typing_in_textbox():
@@ -3037,7 +3141,10 @@ class MainWindow(QMainWindow):
 
     def _is_typing_in_textbox(self) -> bool:
         focused = QApplication.focusWidget()
-        return isinstance(focused, QLineEdit)
+        return isinstance(
+            focused,
+            (QLineEdit, QComboBox, PopupTablePickerButton, QAbstractItemView),
+        )
 
     def _handle_space_shortcut(self) -> None:
         if self.is_playing:
@@ -3046,6 +3153,12 @@ class MainWindow(QMainWindow):
             self.toggle_play()
 
     def eventFilter(self, obj, event) -> bool:
+        if self._handle_combo_popup_key(obj, event):
+            return True
+        if self._handle_video_key(obj, event):
+            return True
+        if self._handle_report_detail_tab_key(obj, event):
+            return True
         if event.type() == QEvent.Type.FocusIn:
             self._open_popup_on_tab_focus(obj, event)
         if obj in self.video_drop_targets and self._handle_video_drop_event(event):
@@ -3090,6 +3203,124 @@ class MainWindow(QMainWindow):
                 self._register_video_file(file_path, confirm_replace=True)
                 return True
         return False
+
+    def _handle_video_key(self, obj, event) -> bool:
+        if obj != self.video_label or event.type() != QEvent.Type.KeyPress:
+            return False
+        if not self._is_report_detail_page_active():
+            return False
+        key = event.key()
+        if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self._focus_defect_registration_start()
+            return True
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            direction = -1 if key == Qt.Key.Key_Left else 1
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.jump_seconds(direction * 5)
+            else:
+                self.step_frame(direction)
+            return True
+        return False
+
+    def _focus_defect_registration_start(self) -> None:
+        self.defect_drive_direction_combo.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _handle_report_detail_tab_key(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        key = event.key()
+        if key not in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            return False
+        if not self._is_report_detail_page_active():
+            return False
+        widget = self._report_detail_tab_widget_for_obj(obj)
+        if widget is None:
+            return False
+        forward = key == Qt.Key.Key_Tab and not (
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        )
+        self._focus_report_detail_relative_to(widget, forward)
+        return True
+
+    def _report_detail_tab_widget_for_obj(self, obj) -> QWidget | None:
+        if not isinstance(obj, QWidget):
+            return None
+        for widget in getattr(self, "_report_detail_tab_sequence", []):
+            if obj is widget or widget.isAncestorOf(obj):
+                return widget
+        return None
+
+    def focusNextPrevChild(self, next: bool) -> bool:
+        if self._is_report_detail_page_active():
+            widget = self._report_detail_tab_widget_for_obj(QApplication.focusWidget())
+            if widget is not None:
+                return self._focus_report_detail_relative_to(widget, next)
+        return super().focusNextPrevChild(next)
+
+    def _focus_report_detail_relative_to(
+        self, widget: QWidget, forward: bool
+    ) -> bool:
+        sequence = [
+            item
+            for item in getattr(self, "_report_detail_tab_sequence", [])
+            if item.isEnabled() and item.isVisible()
+        ]
+        if not sequence:
+            return False
+        try:
+            index = sequence.index(widget)
+        except ValueError:
+            index = -1 if forward else 0
+        step = 1 if forward else -1
+        target = sequence[(index + step) % len(sequence)]
+        reason = (
+            Qt.FocusReason.TabFocusReason
+            if forward
+            else Qt.FocusReason.BacktabFocusReason
+        )
+        target.setFocus(reason)
+        return True
+
+    def _handle_combo_popup_key(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        combo = self._combo_for_popup_event_obj(obj)
+        if combo is None:
+            return False
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._commit_combo_popup_selection(combo)
+            combo.hidePopup()
+            return True
+        if key in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            forward = key == Qt.Key.Key_Tab and not (
+                event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+            )
+            self._commit_combo_popup_selection(combo)
+            combo.hidePopup()
+            QTimer.singleShot(
+                0,
+                lambda combo=combo, forward=forward: self._focus_report_detail_relative_to(
+                    combo, forward
+                ),
+            )
+            return True
+        if key == Qt.Key.Key_Escape:
+            combo.hidePopup()
+            return True
+        return False
+
+    def _combo_for_popup_event_obj(self, obj) -> QComboBox | None:
+        for combo in getattr(self, "_tab_popup_combos", []):
+            if obj in (combo.view(), combo.view().viewport()):
+                return combo
+        return None
+
+    @staticmethod
+    def _commit_combo_popup_selection(combo: QComboBox) -> None:
+        index = combo.view().currentIndex()
+        if index.isValid():
+            combo.setCurrentIndex(index.row())
 
     def _open_popup_on_tab_focus(self, obj, event) -> None:
         if not isinstance(obj, QWidget):
@@ -3674,6 +3905,7 @@ class MainWindow(QMainWindow):
             client=row["client"] or "",
             business_start_date=row["business_start_date"] or "",
             business_end_date=row["business_end_date"] or "",
+            require_all_fields=False,
             parent=self,
         )
         if dialog.exec() != dialog.DialogCode.Accepted:
@@ -4387,20 +4619,42 @@ class MainWindow(QMainWindow):
     def update_export_state(self) -> None:
         if not hasattr(self, "report_export_button"):
             return
-        required_report = [
-            "report_number",
-            "pipe_number",
-            "survey_date",
-            "buried_years",
-        ]
-        report_ok = all(
-            self.report_inputs.get(field) is not None
-            and self.report_inputs[field].text().strip()
-            for field in required_report
-        )
-        pipe_ok = bool(self.length_input.text().strip() and self.total_drive_input.text().strip())
-        enabled = self.current_report_id is not None and report_ok and pipe_ok
+        enabled = self.current_report_id is not None
         self.report_export_button.setEnabled(enabled)
+        if not enabled:
+            self.report_export_button.setToolTip("")
+            return
+        missing = self._missing_report_export_requirements()
+        if missing:
+            self.report_export_button.setToolTip(
+                "필수항목 미입력: " + ", ".join(missing)
+            )
+        else:
+            self.report_export_button.setToolTip("")
+
+    def _missing_report_export_requirements(self) -> list[str]:
+        missing: list[str] = []
+        for field, label in REPORT_EXPORT_REQUIRED_FIELDS:
+            widget = self.report_inputs.get(field)
+            if widget is None or not widget.text().strip():
+                missing.append(label)
+        if not self.length_input.text().strip():
+            missing.append("연장(m)")
+        if not self.total_drive_input.text().strip():
+            missing.append("총주행거리(m)")
+        return missing
+
+    def _warn_missing_report_export_requirements(self) -> bool:
+        missing = self._missing_report_export_requirements()
+        if not missing:
+            return False
+        QMessageBox.warning(
+            self,
+            "보고서 생성",
+            "보고서 생성을 위해 필수항목을 입력하세요:\n- "
+            + "\n- ".join(missing),
+        )
+        return True
 
     def load_report_video(self) -> None:
         self._release_video()
@@ -4622,7 +4876,7 @@ class MainWindow(QMainWindow):
             self.stop_playback()
             return
         self.current_frame = frame
-        self.current_frame_index = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+        self.current_frame_index = self._displayed_frame_index()
         self._render_frame(frame)
 
     def _render_frame(self, frame) -> None:
@@ -4758,8 +5012,13 @@ class MainWindow(QMainWindow):
         ok, frame = self.cap.read()
         if ok:
             self.current_frame = frame
-            self.current_frame_index = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            self.current_frame_index = self._displayed_frame_index()
             self._render_frame(frame)
+
+    def _displayed_frame_index(self) -> int:
+        if self.cap is None:
+            return 0
+        return max(0, int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1)
 
     def _seek_from_slider(self) -> None:
         self.is_user_seeking = False
@@ -4774,12 +5033,22 @@ class MainWindow(QMainWindow):
         target = max(0, self.current_frame_index + delta)
         if self.current_video_meta.fps <= 0:
             return
-        self._seek_ms(int((target / self.current_video_meta.fps) * 1000))
+        self._seek_during_playback(
+            int((target / self.current_video_meta.fps) * 1000)
+        )
 
     def jump_seconds(self, seconds: int) -> None:
         if self.current_video_meta is None:
             return
-        self._seek_ms(self.timeline_slider.value() + (seconds * 1000))
+        self._seek_during_playback(self.timeline_slider.value() + (seconds * 1000))
+
+    def _seek_during_playback(self, target_ms: int) -> None:
+        was_playing = self.is_playing
+        if was_playing:
+            self.play_timer.stop()
+        self._seek_ms(target_ms)
+        if was_playing:
+            self.play_timer.start(self._frame_interval_ms())
 
     def capture_frame(self) -> None:
         if self.current_frame is None:
@@ -5504,7 +5773,8 @@ class MainWindow(QMainWindow):
     def generate_excel_report(self, output_dir: Path | None = None) -> None:
         if self.current_report_id is None:
             return
-        self.save_report_details_without_message()
+        if not self._save_report_details_for_generation():
+            return
         context = self.db.get_report_context(self.current_report_id)
         if context is None:
             return
@@ -5529,13 +5799,20 @@ class MainWindow(QMainWindow):
     def open_report_export_dialog(self) -> None:
         if self.current_report_id is None:
             return
-        report_options = self._pdf_report_options()
-        if not report_options:
-            QMessageBox.warning(self, "보고서 생성", "선택할 수 있는 보고서가 없습니다")
+        if self._warn_missing_report_export_requirements():
+            return
+        if not self._save_report_details_for_generation():
             return
         default_output_dir = self._default_report_output_dir(self.current_report_id)
         context = self.db.get_report_context(self.current_report_id)
         if default_output_dir is None or context is None:
+            QMessageBox.warning(self, "보고서 생성", "현재 보고서 정보를 찾을 수 없습니다")
+            return
+        report_options = self._pdf_report_options()
+        if not report_options:
+            report_options = [self._pdf_report_option_from_context(context)]
+        if not report_options:
+            QMessageBox.warning(self, "보고서 생성", "PDF 보고서 선택 목록을 만들 수 없습니다")
             return
         excel_filename = self._excel_report_path_for_context(context).name
         dialog = ReportExportDialog(
@@ -5616,6 +5893,18 @@ class MainWindow(QMainWindow):
         )
         self._report_details_dirty = False
 
+    def _save_report_details_for_generation(self) -> bool:
+        try:
+            self.save_report_details_without_message()
+        except ValueError as exc:
+            QMessageBox.warning(self, "보고서 생성", str(exc))
+            return False
+        except Exception as exc:
+            self.logger.exception("Failed to save report before generation")
+            QMessageBox.critical(self, "보고서 생성", str(exc))
+            return False
+        return True
+
     def _resolve_default_pipe_png_path(self) -> Optional[str]:
         cwd_pipe = Path.cwd() / "pipe.png"
         if cwd_pipe.exists() and cwd_pipe.is_file():
@@ -5627,23 +5916,30 @@ class MainWindow(QMainWindow):
 
     def _pdf_report_options(self) -> list[tuple[int, str]]:
         options: list[tuple[int, str]] = []
+        seen: set[int] = set()
         for row in self.db.list_report_contexts():
-            report_id = int(row["id"])
-            if report_id == self.current_report_id:
-                continue
-            version_name = row["version_name"] or f"v{row['version_number']}"
-            options.append(
-                (
-                    report_id,
-                    (
-                        f"{row['project_name']} > "
-                        f"{row['business_code']} {row['business_name']} > "
-                        f"{row['report_number']} / {row['pipe_number']} > "
-                        f"{version_name}"
-                    ),
-                )
-            )
+            option = self._pdf_report_option_from_context(row)
+            seen.add(option[0])
+            options.append(option)
+        if self.current_report_id is not None and self.current_report_id not in seen:
+            context = self.db.get_report_context(self.current_report_id)
+            if context is not None:
+                options.append(self._pdf_report_option_from_context(context))
         return options
+
+    @staticmethod
+    def _pdf_report_option_from_context(row) -> tuple[int, str]:
+        report_id = int(row["id"])
+        version_name = row["version_name"] or f"v{row['version_number']}"
+        return (
+            report_id,
+            (
+                f"{row['project_name']} > "
+                f"{row['business_code']} {row['business_name']} > "
+                f"{row['report_number']} / {row['pipe_number']} > "
+                f"{version_name}"
+            ),
+        )
 
     @staticmethod
     def _merge_row_value(row, field: str) -> object:
@@ -5739,7 +6035,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         if self.current_report_id is None:
             return
-        self.save_report_details_without_message()
+        if not self._save_report_details_for_generation():
+            return
         if before_report_id is None:
             before_report_id = self.current_report_id
         is_comparison = report_type == "comparison"
