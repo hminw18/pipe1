@@ -6,6 +6,7 @@ import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -53,6 +54,7 @@ CALIBRATION_SAMPLE_SECONDS = (
 class DepthOcrStopDetectionConfig:
     fps: float = 1.0
     min_stop_duration: float = 3.0
+    stop_distance_tolerance_m: float = 0.5
     merge_gap_threshold: float = 1.0
     max_missing_bridge_seconds: float = 3.0
     min_digit_score: float = 0.5
@@ -427,6 +429,7 @@ class DepthOcrStopSegmentDetector:
         self,
         video_path: str,
         depth_roi: tuple[int, int, int, int],
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> list[dict[str, float]]:
         started = time.perf_counter()
         path = Path(video_path)
@@ -437,9 +440,11 @@ class DepthOcrStopSegmentDetector:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
-        samples = self._read_depth_samples(cap, depth_roi)
+        samples = self._read_depth_samples(cap, depth_roi, progress_callback)
         cap.release()
 
+        if progress_callback is not None:
+            progress_callback(1, 1, "거리 OCR 결과 정리")
         cleaned_values = self._clean_values(samples)
         segments = self._extract_segments(samples, cleaned_values)
         segments = self._merge_same_distance_segments(segments)
@@ -459,6 +464,7 @@ class DepthOcrStopSegmentDetector:
         self,
         cap: cv2.VideoCapture,
         depth_roi: tuple[int, int, int, int],
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> list[DepthSample]:
         native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         sample_fps = max(0.1, float(self.config.fps))
@@ -466,6 +472,10 @@ class DepthOcrStopSegmentDetector:
         next_sample_time = 0.0
         frame_index = 0
         x, y, w, h = depth_roi
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        progress_interval = max(1, int(round(max(native_fps, 1.0) * 2.0)))
+        if progress_callback is not None:
+            progress_callback(0, max(1, frame_count), "거리 OCR 보정")
         calibrated_slots = self._calibrate_digit_slots(cap, depth_roi)
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         samples: list[DepthSample] = []
@@ -501,8 +511,20 @@ class DepthOcrStopSegmentDetector:
                     )
                 )
                 next_sample_time += sample_period
+                if (
+                    progress_callback is not None
+                    and frame_count > 0
+                    and frame_index % progress_interval == 0
+                ):
+                    progress_callback(
+                        frame_index,
+                        frame_count,
+                        f"거리 OCR 샘플 {len(samples)}개",
+                    )
             frame_index += 1
 
+        if progress_callback is not None:
+            progress_callback(max(frame_index, frame_count), max(1, frame_count), "거리 OCR 완료")
         return samples
 
     def _calibrate_digit_slots(
@@ -554,7 +576,11 @@ class DepthOcrStopSegmentDetector:
             while idx < len(cleaned) - gap:
                 left = cleaned[idx - 1]
                 right = cleaned[idx + gap]
-                if left is not None and right is not None and left == right:
+                if (
+                    left is not None
+                    and right is not None
+                    and self._within_stop_distance_tolerance(left, right)
+                ):
                     should_fill = any(cleaned[idx + offset] != left for offset in range(gap))
                     if should_fill:
                         for offset in range(gap):
@@ -575,39 +601,46 @@ class DepthOcrStopSegmentDetector:
 
         sample_period = 1.0 / max(0.1, float(self.config.fps))
         segments: list[dict[str, float]] = []
-        run_value: float | None = None
+        run_anchor: float | None = None
+        run_values: list[float] = []
         run_start: float | None = None
         previous_time = samples[0].time
 
         def close_run(end_time: float) -> None:
-            nonlocal run_value, run_start
-            if run_value is None or run_start is None:
+            nonlocal run_anchor, run_values, run_start
+            if run_anchor is None or run_start is None or not run_values:
                 return
             duration = end_time - run_start
             if duration >= self.config.min_stop_duration:
+                representative_distance = float(round(float(np.median(run_values)), 1))
                 segments.append(
                     {
                         "start_time": float(run_start),
                         "end_time": float(end_time),
                         "duration": float(duration),
-                        "distance_m": float(run_value),
+                        "distance_m": representative_distance,
                     }
                 )
 
         for sample, value in zip(samples, values):
             if value is None:
                 close_run(sample.time)
-                run_value = None
+                run_anchor = None
+                run_values = []
                 run_start = None
                 previous_time = sample.time
                 continue
 
-            if run_value is None:
-                run_value = value
+            if run_anchor is None:
+                run_anchor = value
+                run_values = [value]
                 run_start = sample.time
-            elif value != run_value:
+            elif self._within_stop_distance_tolerance(run_anchor, value):
+                run_values.append(value)
+            else:
                 close_run(sample.time)
-                run_value = value
+                run_anchor = value
+                run_values = [value]
                 run_start = sample.time
             previous_time = sample.time
 
@@ -624,10 +657,21 @@ class DepthOcrStopSegmentDetector:
         for segment in segments[1:]:
             last = merged[-1]
             gap = segment["start_time"] - last["end_time"]
-            same_distance = segment.get("distance_m") == last.get("distance_m")
+            same_distance = self._within_stop_distance_tolerance(
+                segment.get("distance_m"),
+                last.get("distance_m"),
+            )
             if same_distance and gap <= self.config.merge_gap_threshold:
                 last["end_time"] = max(last["end_time"], segment["end_time"])
                 last["duration"] = last["end_time"] - last["start_time"]
             else:
                 merged.append(dict(segment))
         return merged
+
+    def _within_stop_distance_tolerance(
+        self, left: float | None, right: float | None
+    ) -> bool:
+        if left is None or right is None:
+            return False
+        tolerance = max(0.0, float(self.config.stop_distance_tolerance_m))
+        return abs(float(left) - float(right)) <= tolerance
