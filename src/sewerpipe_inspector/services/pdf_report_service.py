@@ -26,6 +26,7 @@ from reportlab.platypus import (
 )
 
 from sewerpipe_inspector.fonts import find_app_report_font_paths
+from sewerpipe_inspector.resources import find_resource
 from sewerpipe_inspector.state_grading import (
     StateGradeSummary,
     compute_pipe_state_grades,
@@ -79,10 +80,11 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 def _load_template_config(pipe_png_path: str) -> PipeTemplateConfig:
     candidates = [
         Path(pipe_png_path).with_name("pipe_template_calibration.json"),
+        find_resource("pipe_template_calibration.json"),
         Path.cwd() / "pipe_template_calibration.json",
     ]
     for path in candidates:
-        if not path.exists() or not path.is_file():
+        if path is None or not path.exists() or not path.is_file():
             continue
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))

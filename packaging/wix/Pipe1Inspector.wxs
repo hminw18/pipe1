@@ -1,0 +1,66 @@
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+    Name="$(var.AppName)"
+    Manufacturer="$(var.Manufacturer)"
+    Version="$(var.AppVersion)"
+    UpgradeCode="7f0ac56d-9127-41d2-8d47-36e6502e2ba9"
+    Scope="perMachine"
+    Compressed="yes">
+
+    <SummaryInformation
+      Description="$(var.AppName) installer"
+      Manufacturer="$(var.Manufacturer)" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of $(var.AppName) is already installed." />
+
+    <MediaTemplate
+      EmbedCab="yes"
+      CompressionLevel="high" />
+
+    <ui:WixUI
+      Id="WixUI_InstallDir"
+      InstallDirectory="INSTALLFOLDER" />
+    <WixVariable
+      Id="WixUILicenseRtf"
+      Value="$(var.WixLicenseRtf)" />
+    <Icon
+      Id="PIPE1.ico"
+      SourceFile="$(var.WixIcon)" />
+    <Property
+      Id="ARPPRODUCTICON"
+      Value="PIPE1.ico" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="$(var.AppName)">
+        <Files Include="$(var.SourceDir)\**" />
+
+        <Component Id="ApplicationShortcuts" Guid="9a15082e-f82d-426c-a6d0-1caa16d3ace3">
+          <Shortcut
+            Id="StartMenuShortcut"
+            Directory="ApplicationProgramsFolder"
+            Name="$(var.AppName)"
+            Target="[INSTALLFOLDER]PIPE1.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder
+            Id="RemoveApplicationProgramsFolder"
+            Directory="ApplicationProgramsFolder"
+            On="uninstall" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\PIPE1"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="$(var.AppName)" />
+    </StandardDirectory>
+  </Package>
+</Wix>

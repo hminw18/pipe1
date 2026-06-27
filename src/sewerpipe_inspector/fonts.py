@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
+
+from sewerpipe_inspector.resources import resource_path_candidates
 
 
 APP_FONT_FAMILY = "Pretendard"
@@ -25,15 +26,10 @@ def app_font_dir_candidates() -> list[Path]:
     package_dir = Path(__file__).resolve().parent
     candidates = [
         package_dir / "assets" / "fonts",
-        Path.cwd() / APP_FONT_DIRNAME,
         package_dir.parents[1] / APP_FONT_DIRNAME,
     ]
-
-    bundle_root = getattr(sys, "_MEIPASS", None)
-    if bundle_root:
-        candidates.append(Path(bundle_root) / APP_FONT_DIRNAME)
-        candidates.append(Path(bundle_root) / "assets" / "fonts")
-
+    candidates.extend(resource_path_candidates(APP_FONT_DIRNAME))
+    candidates.extend(resource_path_candidates(Path("assets") / "fonts"))
     return candidates
 
 
