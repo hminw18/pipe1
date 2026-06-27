@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -50,6 +51,13 @@ class ProjectDialog(QDialog):
     def value(self) -> str:
         return self.project_name_input.text().strip()
 
+    def accept(self) -> None:
+        if not _require_dialog_fields(
+            self, [("프로젝트명", self.project_name_input)]
+        ):
+            return
+        super().accept()
+
 
 class BusinessDialog(QDialog):
     def __init__(
@@ -59,10 +67,12 @@ class BusinessDialog(QDialog):
         client: str = "",
         business_start_date: str = "",
         business_end_date: str = "",
+        require_all_fields: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("사업")
+        self.require_all_fields = require_all_fields
         form = QFormLayout(self)
         self.business_code_input = QLineEdit(business_code)
         self.business_name_input = QLineEdit(business_name)
@@ -89,6 +99,23 @@ class BusinessDialog(QDialog):
             business_start_date=self.business_start_date_input.text().strip(),
             business_end_date=self.business_end_date_input.text().strip(),
         )
+
+    def accept(self) -> None:
+        fields = [
+            ("사업코드", self.business_code_input),
+            ("사업명", self.business_name_input),
+        ]
+        if self.require_all_fields:
+            fields.extend(
+                [
+                    ("발주처", self.client_input),
+                    ("사업시작일", self.business_start_date_input),
+                    ("사업완료일", self.business_end_date_input),
+                ]
+            )
+        if not _require_dialog_fields(self, fields):
+            return
+        super().accept()
 
 
 class ReportDialog(QDialog):
@@ -117,6 +144,28 @@ class ReportDialog(QDialog):
             report_number=self.report_number_input.text().strip(),
             pipe_number=self.pipe_number_input.text().strip(),
         )
+
+    def accept(self) -> None:
+        if not _require_dialog_fields(
+            self,
+            [
+                ("보고서번호", self.report_number_input),
+                ("관로번호", self.pipe_number_input),
+            ],
+        ):
+            return
+        super().accept()
+
+
+def _require_dialog_fields(
+    dialog: QDialog, fields: list[tuple[str, QLineEdit]]
+) -> bool:
+    for label, widget in fields:
+        if not widget.text().strip():
+            QMessageBox.warning(dialog, "필수 입력", f"{label}을(를) 입력하세요")
+            widget.setFocus()
+            return False
+    return True
 
 
 class AfterReportDialog(QDialog):

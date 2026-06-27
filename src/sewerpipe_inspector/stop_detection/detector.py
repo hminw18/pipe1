@@ -9,6 +9,7 @@ import numpy as np
 
 from .config import StopDetectionConfig
 from .utils import mean, merge_close_segments
+from .video_capture import open_analysis_video_capture
 
 
 class StopSegmentDetector:
@@ -22,7 +23,7 @@ class StopSegmentDetector:
         if not path.exists():
             raise FileNotFoundError(str(path))
 
-        cap = cv2.VideoCapture(str(path))
+        cap = open_analysis_video_capture(path)
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
