@@ -4536,6 +4536,9 @@ class MainWindow(QMainWindow):
         if self.pending_capture_frame is None or self.pending_capture_timestamp_ms is None:
             QMessageBox.warning(self, "결함", "먼저 프레임을 캡처하세요")
             return
+        distance_m = self._validated_defect_distance()
+        if distance_m is None:
+            return
         selection = self._validated_defect_selection()
         if selection is None:
             return
@@ -4548,7 +4551,7 @@ class MainWindow(QMainWindow):
                 frame=self.pending_capture_frame,
                 timestamp_ms=self.pending_capture_timestamp_ms,
                 drive_direction=self.defect_drive_direction_combo.currentText(),
-                distance_m=parse_required_float(self.distance_input.text(), "거리(m)"),
+                distance_m=distance_m,
                 item_category=self.item_category_combo.currentText(),
                 condition_item=condition_item,
                 defect_item=defect_item,
@@ -4571,8 +4574,18 @@ class MainWindow(QMainWindow):
         self.refresh_defects()
         self.update_summary()
 
+    def _validated_defect_distance(self) -> float | None:
+        try:
+            return parse_required_float(self.distance_input.text(), "거리(m)")
+        except ValueError as exc:
+            QMessageBox.warning(self, "입력 오류", str(exc))
+            return None
+
     def _save_defect_edit(self) -> None:
         if self.editing_defect_id is None:
+            return
+        distance_m = self._validated_defect_distance()
+        if distance_m is None:
             return
         selection = self._validated_defect_selection()
         if selection is None:
@@ -4583,7 +4596,7 @@ class MainWindow(QMainWindow):
                 self.editing_defect_id,
                 {
                     "drive_direction": self.defect_drive_direction_combo.currentText(),
-                    "distance_m": parse_required_float(self.distance_input.text(), "거리(m)"),
+                    "distance_m": distance_m,
                     "item_category": self.item_category_combo.currentText(),
                     "condition_item": condition_item,
                     "defect_item": defect_item,
