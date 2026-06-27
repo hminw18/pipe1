@@ -2299,6 +2299,7 @@ class MainWindow(QMainWindow):
         self.right_layout.addWidget(self.center_panel)
         self.right_layout.addWidget(self._build_defect_form_group())
         self.right_layout.addWidget(self._build_defect_table_group())
+        self._configure_report_detail_tab_order()
         self.right_layout.addStretch(1)
         return panel
 
@@ -2678,22 +2679,73 @@ class MainWindow(QMainWindow):
         self.save_defect_button = QPushButton("결함 저장 (Enter)")
         self.save_defect_button.setObjectName("primaryButton")
         self.save_defect_button.clicked.connect(self.save_defect)
-        edit_button = QPushButton("선택 결함 수정")
-        edit_button.setObjectName("secondaryButton")
-        edit_button.clicked.connect(self.edit_selected_defect)
-        cancel_button = QPushButton("수정 취소")
-        cancel_button.setObjectName("secondaryButton")
-        cancel_button.clicked.connect(self.cancel_defect_edit)
+        self.edit_defect_button = QPushButton("선택 결함 수정")
+        self.edit_defect_button.setObjectName("secondaryButton")
+        self.edit_defect_button.clicked.connect(self.edit_selected_defect)
+        self.cancel_defect_edit_button = QPushButton("수정 취소")
+        self.cancel_defect_edit_button.setObjectName("secondaryButton")
+        self.cancel_defect_edit_button.clicked.connect(self.cancel_defect_edit)
         for widget in (
             self.save_defect_button,
-            edit_button,
-            cancel_button,
+            self.edit_defect_button,
+            self.cancel_defect_edit_button,
         ):
             action_row.addWidget(widget)
             self.report_controls.append(widget)
         action_row.addStretch(1)
         layout.addLayout(action_row)
         return section
+
+    def _configure_report_detail_tab_order(self) -> None:
+        widgets = self._report_detail_tab_widgets()
+        for widget in widgets:
+            if isinstance(widget, (QComboBox, PopupTablePickerButton)):
+                self._install_tab_focus_popup(widget)
+        for previous, current in zip(widgets, widgets[1:]):
+            QWidget.setTabOrder(previous, current)
+
+    def _report_detail_tab_widgets(self) -> list[QWidget]:
+        widgets: list[QWidget] = []
+        for fields in REPORT_INFO_TABLE_ROWS:
+            for field, _label in fields:
+                widget = self.report_inputs.get(field)
+                if widget is not None:
+                    widgets.append(widget)
+        for role in ("upstream", "downstream"):
+            for field, _label in MANHOLE_LABELS:
+                widget = self.manhole_inputs[role].get(field)
+                if widget is not None:
+                    widgets.append(widget)
+        widgets.extend(
+            [
+                self.length_input,
+                self.total_drive_input,
+                self.start_occurrence_input,
+                self.start_reason_combo,
+                self.start_reason_detail_input,
+                self.end_occurrence_input,
+                self.end_reason_combo,
+                self.end_reason_detail_input,
+                self.survey_content_input,
+                self.defect_drive_direction_combo,
+                self.distance_input,
+                self.item_category_combo,
+                self.condition_item_combo,
+                self.defect_item_combo,
+                self.grade_combo,
+                self.quadrant_combo,
+                self.manhole_defect_depth_input,
+                self.memo_input,
+                self.save_defect_button,
+                self.edit_defect_button,
+                self.cancel_defect_edit_button,
+            ]
+        )
+        return widgets
+
+    def _install_tab_focus_popup(self, widget: QWidget) -> None:
+        widget.setProperty("openPopupOnTabFocus", True)
+        widget.installEventFilter(self)
 
     def _defect_category_changed(self, _category: str) -> None:
         self._refresh_defect_taxonomy_controls()
@@ -2994,6 +3046,8 @@ class MainWindow(QMainWindow):
             self.toggle_play()
 
     def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.FocusIn:
+            self._open_popup_on_tab_focus(obj, event)
         if obj in self.video_drop_targets and self._handle_video_drop_event(event):
             return True
         if obj == self.video_label and self.is_selecting_depth_roi:
@@ -3036,6 +3090,32 @@ class MainWindow(QMainWindow):
                 self._register_video_file(file_path, confirm_replace=True)
                 return True
         return False
+
+    def _open_popup_on_tab_focus(self, obj, event) -> None:
+        if not isinstance(obj, QWidget):
+            return
+        if not obj.property("openPopupOnTabFocus"):
+            return
+        if not obj.isEnabled() or not obj.isVisible():
+            return
+        if not self._is_report_detail_page_active():
+            return
+        if event.reason() not in (
+            Qt.FocusReason.TabFocusReason,
+            Qt.FocusReason.BacktabFocusReason,
+        ):
+            return
+        QTimer.singleShot(0, lambda widget=obj: self._show_focus_popup(widget))
+
+    def _show_focus_popup(self, widget: QWidget) -> None:
+        if not widget.hasFocus() or not widget.isEnabled() or not widget.isVisible():
+            return
+        if isinstance(widget, QComboBox):
+            if widget.count() > 0:
+                widget.showPopup()
+            return
+        if isinstance(widget, PopupTablePickerButton):
+            widget._show_popup()
 
     def _dropped_video_path(self, mime_data) -> Optional[Path]:
         if self.current_report_id is None or not mime_data.hasUrls():
