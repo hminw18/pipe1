@@ -11,9 +11,10 @@ def test_lightsail_deployment_assets_exist_and_reference_expected_services() -> 
     caddyfile = ROOT / "deploy" / "lightsail" / "Caddyfile"
     env_example = ROOT / "deploy" / "lightsail" / ".env.example"
     backup = ROOT / "deploy" / "lightsail" / "backup_postgres.sh"
+    wrapper = ROOT / "deploy" / "lightsail" / "pipe1"
     dockerfile = ROOT / "server" / "license_server" / "Dockerfile"
 
-    for path in (compose, caddyfile, env_example, backup, dockerfile):
+    for path in (compose, caddyfile, env_example, backup, wrapper, dockerfile):
         assert path.exists(), path
 
     compose_text = compose.read_text(encoding="utf-8")
@@ -34,3 +35,7 @@ def test_lightsail_deployment_assets_exist_and_reference_expected_services() -> 
     assert "PIPE1_LICENSE_SIGNING_PRIVATE_KEY=" in env_text
     assert "DATABASE_URL=" in env_text
     assert "PIPE1_LICENSE_DOMAIN=" in env_text
+
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "docker compose exec -T api pipe1-admin" in wrapper_text
+    assert "./pipe1 org list" in wrapper_text
