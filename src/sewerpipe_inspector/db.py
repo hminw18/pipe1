@@ -295,15 +295,27 @@ class Database:
     def _connect(self) -> sqlite3.Connection:
         needs_schema = not self.db_path.exists()
         conn = self._open_connection()
-        if needs_schema:
-            self._initialize_schema(conn)
-            self._run_migrations_on_connection(conn)
-            conn.commit()
+        try:
+            if needs_schema:
+                self._initialize_schema(conn)
+                self._run_migrations_on_connection(conn)
+                conn.commit()
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
         return conn
 
     def _init_schema(self) -> None:
-        with self._open_connection() as conn:
+        conn = self._open_connection()
+        try:
             self._initialize_schema(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         self._run_migrations()
 
     def _initialize_schema(self, conn: sqlite3.Connection) -> None:
@@ -708,16 +720,24 @@ class Database:
         finally:
             conn.close()
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     def fetchall(
         self, query: str, params: tuple[object, ...] = ()
     ) -> list[sqlite3.Row]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             return list(conn.execute(query, params).fetchall())
 
     def fetchone(
         self, query: str, params: tuple[object, ...] = ()
     ) -> Optional[sqlite3.Row]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             return conn.execute(query, params).fetchone()
 
     def execute(self, query: str, params: tuple[object, ...] = ()) -> int:
