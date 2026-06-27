@@ -85,7 +85,7 @@ class InspectionService:
             version_name=context["version_name"],
         )
 
-        if not cv2.imwrite(str(capture_path), frame):
+        if not self._write_frame_capture(capture_path, frame):
             self.logger.error("Failed to save frame capture to %s", capture_path)
             raise RuntimeError("Frame capture save failed")
 
@@ -114,6 +114,20 @@ class InspectionService:
         except Exception:
             capture_path.unlink(missing_ok=True)
             raise
+
+    def _write_frame_capture(self, path: Path, frame) -> bool:
+        suffix = path.suffix or ".png"
+        try:
+            ok, encoded = cv2.imencode(suffix, frame)
+        except cv2.error:
+            return False
+        if not ok:
+            return False
+        try:
+            path.write_bytes(encoded.tobytes())
+        except OSError:
+            return False
+        return True
 
     def read_distance_for_frame(self, video_id: int, frame) -> Optional[float]:
         video_row = self.db.get_video_by_id(video_id)
