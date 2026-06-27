@@ -3098,7 +3098,6 @@ class MainWindow(QMainWindow):
 
     def _register_shortcuts(self) -> None:
         actions = [
-            ("Space", self._handle_space_shortcut),
             ("3", lambda: self.set_grade("대")),
             ("2", lambda: self.set_grade("중")),
             ("1", lambda: self.set_grade("소")),
@@ -3147,13 +3146,18 @@ class MainWindow(QMainWindow):
         )
 
     def _handle_space_shortcut(self) -> None:
+        self.video_label.setFocus(Qt.FocusReason.OtherFocusReason)
         if self.is_playing:
             self.capture_frame()
         else:
             self.toggle_play()
 
     def eventFilter(self, obj, event) -> bool:
+        if self._handle_global_space_key(obj, event):
+            return True
         if self._handle_combo_popup_key(obj, event):
+            return True
+        if self._handle_defect_enter_key(obj, event):
             return True
         if self._handle_video_key(obj, event):
             return True
@@ -3187,6 +3191,40 @@ class MainWindow(QMainWindow):
                     self._refresh_video_display()
                     return True
         return super().eventFilter(obj, event)
+
+    def _handle_global_space_key(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        if event.key() != Qt.Key.Key_Space:
+            return False
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
+        if event.isAutoRepeat():
+            return True
+        if QApplication.activeModalWidget() is not None:
+            return False
+        if not self._is_report_detail_page_active():
+            return False
+        self._handle_space_shortcut()
+        return True
+
+    def _handle_defect_enter_key(self, obj, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        if event.key() not in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return False
+        if event.isAutoRepeat():
+            return True
+        if not self._is_report_detail_page_active():
+            return False
+        if QApplication.activeModalWidget() is not None:
+            return False
+        if self._defect_registration_widget_for_obj(obj) is None:
+            return False
+        if not self._is_defect_ready_for_enter_save():
+            return False
+        self.save_defect()
+        return True
 
     def _handle_video_drop_event(self, event) -> bool:
         if event.type() in (
@@ -3224,6 +3262,57 @@ class MainWindow(QMainWindow):
 
     def _focus_defect_registration_start(self) -> None:
         self.defect_drive_direction_combo.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _defect_registration_widgets(self) -> list[QWidget]:
+        return [
+            self.defect_drive_direction_combo,
+            self.distance_input,
+            self.item_category_combo,
+            self.condition_item_combo,
+            self.defect_item_combo,
+            self.grade_combo,
+            self.quadrant_combo,
+            self.manhole_defect_depth_input,
+            self.memo_input,
+        ]
+
+    def _defect_registration_widget_for_obj(self, obj) -> QWidget | None:
+        if not isinstance(obj, QWidget):
+            return None
+        for widget in self._defect_registration_widgets():
+            if obj is widget or widget.isAncestorOf(obj):
+                return widget
+        return None
+
+    def _is_defect_ready_for_enter_save(self) -> bool:
+        if self.editing_defect_id is None:
+            if (
+                self.current_report_id is None
+                or self.current_video_id is None
+                or self.current_video_path is None
+                or self.pending_capture_frame is None
+                or self.pending_capture_timestamp_ms is None
+            ):
+                return False
+        try:
+            parse_required_float(self.distance_input.text(), "거리(m)")
+            parse_float(self.manhole_defect_depth_input.text())
+        except ValueError:
+            return False
+        condition_item, defect_item, grade = self._normalized_defect_selection()
+        if condition_item is None and defect_item is None:
+            return False
+        if defect_item is None:
+            return True
+        return (
+            grade in {"대", "중", "소"}
+            and defect_score(
+                self.item_category_combo.currentText(),
+                defect_item,
+                grade,
+            )
+            is not None
+        )
 
     def _handle_report_detail_tab_key(self, obj, event) -> bool:
         if event.type() != QEvent.Type.KeyPress:
