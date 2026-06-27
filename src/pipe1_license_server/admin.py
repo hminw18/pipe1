@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pipe1_license_server.db import init_db, session_scope
 from pipe1_license_server.models import (
@@ -39,6 +39,10 @@ def _parse_datetime(value: str | datetime | None) -> datetime | None:
     normalized = value.replace("Z", "+00:00")
     parsed = datetime.fromisoformat(normalized)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 def _new_id(prefix: str) -> str:
@@ -81,6 +85,40 @@ class AdminService:
                 )
             )
         return organization.id
+
+    def list_organizations(self) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            rows = session.execute(
+                select(Organization).order_by(
+                    Organization.created_at.desc(), Organization.name.asc()
+                )
+            ).scalars()
+            organizations = []
+            for row in rows:
+                license_count = session.scalar(
+                    select(func.count(License.id)).where(
+                        License.organization_id == row.id
+                    )
+                )
+                active_license_count = session.scalar(
+                    select(func.count(License.id)).where(
+                        License.organization_id == row.id,
+                        License.status == "active",
+                    )
+                )
+                organizations.append(
+                    {
+                        "id": row.id,
+                        "name": row.name,
+                        "status": row.status,
+                        "contact_email": row.contact_email,
+                        "license_count": int(license_count or 0),
+                        "active_license_count": int(active_license_count or 0),
+                        "created_at": _iso(row.created_at),
+                        "updated_at": _iso(row.updated_at),
+                    }
+                )
+            return organizations
 
     def create_license(
         self,
@@ -157,6 +195,49 @@ class AdminService:
             )
         return license_id
 
+    def list_licenses(
+        self, organization_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            query = select(License)
+            if organization_id:
+                query = query.where(License.organization_id == organization_id)
+            rows = session.execute(
+                query.order_by(License.created_at.desc(), License.id.asc())
+            ).scalars()
+            licenses = []
+            for row in rows:
+                active_devices = session.scalar(
+                    select(func.count(DeviceActivation.id)).where(
+                        DeviceActivation.license_id == row.id,
+                        DeviceActivation.status == "active",
+                    )
+                )
+                total_devices = session.scalar(
+                    select(func.count(DeviceActivation.id)).where(
+                        DeviceActivation.license_id == row.id
+                    )
+                )
+                licenses.append(
+                    {
+                        "id": row.id,
+                        "organization_id": row.organization_id,
+                        "organization_name": row.organization.name,
+                        "plan": row.plan,
+                        "status": row.status,
+                        "seat_model": row.seat_model,
+                        "device_limit": row.device_limit,
+                        "active_devices": int(active_devices or 0),
+                        "total_devices": int(total_devices or 0),
+                        "starts_at": _iso(row.starts_at),
+                        "expires_at": _iso(row.expires_at),
+                        "offline_grace_days": row.offline_grace_days,
+                        "created_at": _iso(row.created_at),
+                        "updated_at": _iso(row.updated_at),
+                    }
+                )
+            return licenses
+
     def generate_license_key(
         self, license_id: str, *, key_type: str = "production", actor: str = "developer"
     ) -> str:
@@ -194,6 +275,35 @@ class AdminService:
             if result is not None:
                 session.expunge(result)
             return result
+
+    def list_license_keys(
+        self, license_id: str | None = None, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            query = select(LicenseKey)
+            if license_id:
+                query = query.where(LicenseKey.license_id == license_id)
+            if status:
+                query = query.where(LicenseKey.status == status)
+            rows = session.execute(
+                query.order_by(LicenseKey.issued_at.desc(), LicenseKey.id.asc())
+            ).scalars()
+            return [
+                {
+                    "id": row.id,
+                    "license_id": row.license_id,
+                    "key_prefix": row.key_prefix,
+                    "status": row.status,
+                    "key_type": row.key_type,
+                    "issued_at": _iso(row.issued_at),
+                    "revoked_at": _iso(row.revoked_at),
+                    "last_used_at": _iso(row.last_used_at),
+                    "replaced_by_key_id": row.replaced_by_key_id,
+                    "created_at": _iso(row.created_at),
+                    "updated_at": _iso(row.updated_at),
+                }
+                for row in rows
+            ]
 
     def revoke_license_key(self, key_prefix: str, *, actor: str = "developer") -> None:
         with session_scope(self.settings) as session:
@@ -281,27 +391,33 @@ class AdminService:
             )
 
     def list_device_activations(
-        self, license_id: str, *, active_only: bool = True
+        self, license_id: str | None = None, *, active_only: bool = True
     ) -> list[dict[str, Any]]:
         with session_scope(self.settings) as session:
-            query = select(DeviceActivation).where(DeviceActivation.license_id == license_id)
+            query = select(DeviceActivation)
+            if license_id:
+                query = query.where(DeviceActivation.license_id == license_id)
             if active_only:
                 query = query.where(DeviceActivation.status == "active")
-            rows = session.execute(query.order_by(DeviceActivation.activated_at.asc())).scalars()
+            rows = session.execute(
+                query.order_by(
+                    DeviceActivation.activated_at.desc(), DeviceActivation.id.asc()
+                )
+            ).scalars()
             return [
                 {
                     "id": row.id,
                     "license_id": row.license_id,
+                    "organization_name": row.license.organization.name,
                     "device_id": row.device_id,
                     "device_name": row.device_name,
                     "os_name": row.os_name,
                     "os_version": row.os_version,
                     "app_version": row.app_version,
                     "status": row.status,
-                    "activated_at": row.activated_at.isoformat(),
-                    "last_validated_at": row.last_validated_at.isoformat()
-                    if row.last_validated_at
-                    else None,
+                    "activated_at": _iso(row.activated_at),
+                    "last_validated_at": _iso(row.last_validated_at),
+                    "deactivated_at": _iso(row.deactivated_at),
                 }
                 for row in rows
             ]
@@ -344,6 +460,27 @@ class AdminService:
                     metadata_json={"feature_key": feature_key, "enabled": enabled},
                 )
             )
+
+    def list_features(self, license_id: str | None = None) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            query = select(LicenseFeature)
+            if license_id:
+                query = query.where(LicenseFeature.license_id == license_id)
+            rows = session.execute(
+                query.order_by(LicenseFeature.license_id.asc(), LicenseFeature.feature_key.asc())
+            ).scalars()
+            return [
+                {
+                    "id": row.id,
+                    "license_id": row.license_id,
+                    "feature": row.feature_key,
+                    "enabled": row.enabled,
+                    "metadata": row.metadata_json or {},
+                    "created_at": _iso(row.created_at),
+                    "updated_at": _iso(row.updated_at),
+                }
+                for row in rows
+            ]
 
     def set_ai_quota(
         self,
@@ -403,6 +540,35 @@ class AdminService:
                 )
             )
 
+    def list_quotas(self, license_id: str | None = None) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            query = select(LicenseUsageQuota)
+            if license_id:
+                query = query.where(LicenseUsageQuota.license_id == license_id)
+            rows = session.execute(
+                query.order_by(
+                    LicenseUsageQuota.license_id.asc(),
+                    LicenseUsageQuota.feature_key.asc(),
+                )
+            ).scalars()
+            return [
+                {
+                    "id": row.id,
+                    "license_id": row.license_id,
+                    "feature": row.feature_key,
+                    "period": row.period,
+                    "unit": row.unit,
+                    "limit": row.limit,
+                    "used": row.used,
+                    "remaining": max(0, row.limit - row.used),
+                    "reset_at": _iso(row.reset_at),
+                    "overage_policy": row.overage_policy,
+                    "created_at": _iso(row.created_at),
+                    "updated_at": _iso(row.updated_at),
+                }
+                for row in rows
+            ]
+
     def record_usage_event(
         self,
         license_id: str,
@@ -443,6 +609,7 @@ class AdminService:
                     "unit": event.unit,
                     "request_id": event.request_id,
                     "metadata": event.metadata_json or {},
+                    "created_at": _iso(event.created_at),
                 }
                 for event in events
             ]
@@ -460,6 +627,7 @@ class AdminService:
                     "target_type": event.target_type,
                     "target_id": event.target_id,
                     "metadata": event.metadata_json or {},
+                    "created_at": _iso(event.created_at),
                 }
                 for event in events
             ]

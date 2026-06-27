@@ -154,3 +154,105 @@ def test_admin_cli_can_issue_and_revoke_key(tmp_path: Path) -> None:
     assert license_row["id"].startswith("lic_")
     assert key["license_key"].startswith("PIPE1-")
     assert revoked["status"] == "revoked"
+
+
+def test_admin_cli_can_list_license_server_records(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+    out = StringIO()
+    org = run_cli(
+        ["org", "create", "--name", "Lookup Co", "--contact-email", "lookup@example.com"],
+        settings=settings,
+        stdout=out,
+    )
+    license_row = run_cli(
+        [
+            "license",
+            "create",
+            "--org",
+            org["id"],
+            "--plan",
+            "standard",
+            "--device-limit",
+            "2",
+            "--expires-at",
+            "2027-06-30T23:59:59Z",
+        ],
+        settings=settings,
+        stdout=out,
+    )
+    key = run_cli(
+        ["key", "generate", "--license", license_row["id"]],
+        settings=settings,
+        stdout=out,
+    )
+    activation = _activate(client, key["license_key"], "pipe1-lookup-dev-001")
+    run_cli(
+        [
+            "feature",
+            "set",
+            "--license",
+            license_row["id"],
+            "--feature",
+            "training_upload",
+            "--enabled",
+            "true",
+        ],
+        settings=settings,
+        stdout=out,
+    )
+    run_cli(
+        [
+            "quota",
+            "set",
+            "--license",
+            license_row["id"],
+            "--feature",
+            "ai_assist",
+            "--unit",
+            "credit",
+            "--limit",
+            "1000",
+            "--period",
+            "monthly",
+        ],
+        settings=settings,
+        stdout=out,
+    )
+
+    organizations = run_cli(["org", "list"], settings=settings, stdout=out)
+    licenses = run_cli(["license", "list"], settings=settings, stdout=out)
+    keys = run_cli(
+        ["key", "list", "--license", license_row["id"]],
+        settings=settings,
+        stdout=out,
+    )
+    devices = run_cli(
+        ["devices", "list", "--license", license_row["id"], "--all"],
+        settings=settings,
+        stdout=out,
+    )
+    features = run_cli(
+        ["feature", "list", "--license", license_row["id"]],
+        settings=settings,
+        stdout=out,
+    )
+    quotas = run_cli(
+        ["quota", "list", "--license", license_row["id"]],
+        settings=settings,
+        stdout=out,
+    )
+
+    assert organizations["organizations"][0]["name"] == "Lookup Co"
+    assert organizations["organizations"][0]["license_count"] == 1
+    assert licenses["licenses"][0]["organization_name"] == "Lookup Co"
+    assert licenses["licenses"][0]["active_devices"] == 1
+    assert keys["keys"][0]["key_prefix"] == key["license_key"][:10]
+    assert "key_hash" not in keys["keys"][0]
+    assert devices["devices"][0]["id"] == activation["activation_id"]
+    assert devices["devices"][0]["device_id"] == "pipe1-lookup-dev-001"
+    assert features["features"][0]["feature"] == "training_upload"
+    assert features["features"][0]["enabled"] is True
+    assert quotas["quotas"][0]["feature"] == "ai_assist"
+    assert quotas["quotas"][0]["remaining"] == 1000
