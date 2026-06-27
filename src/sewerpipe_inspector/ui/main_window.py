@@ -5991,7 +5991,10 @@ class NavigationList(QListWidget):
         font = item.font()
         font.setBold(self.kind in {"project", "business"})
         if nav_type == "report_version":
-            font.setPointSize(max(9, font.pointSize() - 1))
+            point_size = font.pointSize()
+            if point_size <= 0:
+                point_size = QApplication.font().pointSize()
+            font.setPointSize(max(9, point_size - 1))
         item.setFont(font)
         return item
 
