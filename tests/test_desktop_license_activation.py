@@ -6,9 +6,18 @@ from pathlib import Path
 from pipe1_license_server.signing import EntitlementSigner, generate_private_key_b64
 from sewerpipe_inspector.licensing.api_client import LicenseApiClientProtocol
 from sewerpipe_inspector.licensing.device_identity import DeviceIdentity
+from sewerpipe_inspector.licensing.dpapi import DpapiProtector
 from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
 from sewerpipe_inspector.licensing.license_service import LicenseService
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
+
+
+class FakeProtector:
+    def protect(self, data: bytes) -> bytes:
+        return data[::-1]
+
+    def unprotect(self, protected_data: bytes) -> bytes:
+        return protected_data[::-1]
 
 
 class FakeLicenseClient(LicenseApiClientProtocol):
@@ -78,8 +87,12 @@ def test_desktop_activation_stores_signed_entitlement_without_raw_key(
     signer = EntitlementSigner(private_key, "test-key")
     verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
     client = FakeLicenseClient(signer)
-    store = LocalLicenseStore(tmp_path / "license_state.json")
-    device_identity = DeviceIdentity(tmp_path / "device_id")
+    store = LocalLicenseStore(
+        tmp_path / "license_state.json", protector=FakeProtector()
+    )
+    device_identity = DeviceIdentity(
+        tmp_path / "device_id", protector=FakeProtector()
+    )
     service = LicenseService(
         store=store,
         device_identity=device_identity,
@@ -95,7 +108,8 @@ def test_desktop_activation_stores_signed_entitlement_without_raw_key(
     assert client.seen_activation_keys == ["PIPE1-ABCD-EFGH-IJKL-MNOP"]
     raw_state = (tmp_path / "license_state.json").read_text(encoding="utf-8")
     assert "PIPE1-ABCD-EFGH-IJKL-MNOP" not in raw_state
-    assert "PIPE1-ABCD" in raw_state
+    assert "PIPE1-ABCD" not in raw_state
+    assert "pipe1.license_state.dpapi.v1" in raw_state
 
     reloaded = service.current_status()
     assert reloaded.status == "active"
@@ -119,13 +133,17 @@ def test_desktop_rejects_entitlement_for_other_device(tmp_path: Path) -> None:
             "issued_at": datetime.now(UTC).isoformat(),
         }
     )
-    store = LocalLicenseStore(tmp_path / "license_state.json")
+    store = LocalLicenseStore(
+        tmp_path / "license_state.json", protector=FakeProtector()
+    )
     store.save_activation_state(
         activation_id="act_test",
         masked_license_key="PIPE1-ABCD",
         entitlement=other_device_entitlement,
     )
-    device_identity = DeviceIdentity(tmp_path / "device_id")
+    device_identity = DeviceIdentity(
+        tmp_path / "device_id", protector=FakeProtector()
+    )
     device_identity.get_or_create("pipe1-dev-current")
     service = LicenseService(
         store=store,
@@ -139,4 +157,59 @@ def test_desktop_rejects_entitlement_for_other_device(tmp_path: Path) -> None:
 
     assert status.status == "invalid"
     assert "device" in (status.reason or "")
+
+
+def test_plaintext_license_state_is_not_trusted(tmp_path: Path) -> None:
+    state_file = tmp_path / "license_state.json"
+    state_file.write_text(
+        '{"activation_id":"act_copied","entitlement":{"payload":{}}}',
+        encoding="utf-8",
+    )
+    store = LocalLicenseStore(state_file, protector=FakeProtector())
+
+    assert store.load() is None
+
+
+def test_dpapi_protector_roundtrip_when_available() -> None:
+    if not DpapiProtector.is_available():
+        return
+    protector = DpapiProtector()
+    protected = protector.protect(b"pipe1-secret-state")
+
+    assert protected != b"pipe1-secret-state"
+    assert protector.unprotect(protected) == b"pipe1-secret-state"
+
+
+def test_device_identity_stores_random_id_in_protected_file(tmp_path: Path) -> None:
+    device_file = tmp_path / "device_id"
+    device_identity = DeviceIdentity(device_file, protector=FakeProtector())
+
+    first = device_identity.get_or_create()
+    second = device_identity.get_or_create()
+    raw_file = device_file.read_text(encoding="utf-8")
+
+    assert first == second
+    assert first.startswith("pipe1-")
+    assert first not in raw_file
+    assert "pipe1.device_id.dpapi.v1" in raw_file
+
+
+def test_plaintext_device_id_file_is_not_trusted(tmp_path: Path) -> None:
+    device_file = tmp_path / "device_id"
+    device_file.write_text("pipe1-copied-random-id", encoding="utf-8")
+    device_identity = DeviceIdentity(device_file, protector=FakeProtector())
+
+    device_id = device_identity.get_or_create()
+
+    assert device_id != "pipe1-copied-random-id"
+    assert device_id not in device_file.read_text(encoding="utf-8")
+
+
+def test_device_identity_forced_value_is_stored_protected(tmp_path: Path) -> None:
+    device_file = tmp_path / "device_id"
+    device_identity = DeviceIdentity(device_file, protector=FakeProtector())
+
+    assert device_identity.get_or_create("pipe1-forced-id") == "pipe1-forced-id"
+    assert device_identity.get_or_create() == "pipe1-forced-id"
+    assert "pipe1-forced-id" not in device_file.read_text(encoding="utf-8")
 

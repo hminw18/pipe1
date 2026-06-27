@@ -59,7 +59,7 @@ class LicenseActivationDialog(QDialog):
         self.license_status: LicenseStatus | None = None
         self._thread: QThread | None = None
         self._worker: _ActivationWorker | None = None
-        self.setWindowTitle("Pipe1 라이선스 활성화")
+        self.setWindowTitle("PIPE1 라이선스 활성화")
         self.setModal(True)
         self._build_ui()
 

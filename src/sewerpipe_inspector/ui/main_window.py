@@ -78,6 +78,7 @@ from sewerpipe_inspector.defect_taxonomy import (
     grades_for_defect,
 )
 from sewerpipe_inspector.logging_config import configure_logging
+from sewerpipe_inspector.resources import find_resource
 from sewerpipe_inspector.services.inspection_service import InspectionService
 from sewerpipe_inspector.services.pdf_report_service import generate_pipe_pdf_report
 from sewerpipe_inspector.services.storage_service import StorageService
@@ -1666,7 +1667,8 @@ class MainWindow(QMainWindow):
         self.autosave_timer.setSingleShot(True)
         self.autosave_timer.timeout.connect(self._autosave_report_details)
 
-        self.setWindowTitle("하수관로 점검 데스크톱")
+        self.setWindowTitle("PIPE1")
+        self._set_app_icon()
         self.resize(1600, 950)
         self.setStyleSheet(APP_STYLE)
         self._build_ui()
@@ -1679,6 +1681,18 @@ class MainWindow(QMainWindow):
         self.refresh_tree()
         self._set_report_controls_enabled(False)
         self._update_shortcut_enabled_state()
+
+    def _set_app_icon(self) -> None:
+        logo_path = find_resource("logo.png")
+        if logo_path is None or not logo_path.is_file():
+            return
+        icon = QIcon(str(logo_path))
+        if icon.isNull():
+            return
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -1753,7 +1767,7 @@ class MainWindow(QMainWindow):
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(0, 0, 0, 6)
         brand_layout.setSpacing(2)
-        brand_title = QLabel("Pipe1", self)
+        brand_title = QLabel("PIPE1", self)
         brand_title.setObjectName("sidebarBrand")
         brand_subtitle = QLabel("하수관로 맨홀 조사", self)
         brand_subtitle.setObjectName("sidebarSubtitle")
@@ -2143,7 +2157,7 @@ class MainWindow(QMainWindow):
         self.page_title_label.setObjectName("pageTitle")
         self.page_subtitle_label = QLabel("프로젝트별 사업과 보고서를 관리합니다.", self)
         self.page_subtitle_label.setObjectName("pageSubtitle")
-        self.breadcrumb_label = QLabel("Pipe1 > 프로젝트", self)
+        self.breadcrumb_label = QLabel("PIPE1 > 프로젝트", self)
         self.breadcrumb_label.setObjectName("breadcrumb")
         layout.addWidget(self.page_title_label)
         layout.addWidget(self.page_subtitle_label)
@@ -3487,7 +3501,7 @@ class MainWindow(QMainWindow):
         self._set_page_header(
             "프로젝트 목록",
             "프로젝트별 사업과 보고서를 관리합니다.",
-            ["Pipe1", "프로젝트"],
+            ["PIPE1", "프로젝트"],
         )
         self.project_table.setRowCount(0)
         rows = self.db.list_projects_with_counts()
@@ -3520,7 +3534,7 @@ class MainWindow(QMainWindow):
         self._set_page_header(
             f"{project['project_name']} - 사업 목록",
             "선택한 프로젝트의 사업을 생성하고 관리합니다.",
-            ["Pipe1", project["project_name"]],
+            ["PIPE1", project["project_name"]],
         )
         rows = self.db.list_businesses_with_counts(project_id)
         self.business_count_label.setText(f"총 {len(rows)}건")
@@ -3557,7 +3571,7 @@ class MainWindow(QMainWindow):
             f"{business['business_name']} - 보고서 목록",
             "선택한 사업의 보고서를 생성하고 조사 결과를 관리합니다.",
             [
-                "Pipe1",
+                "PIPE1",
                 project_name,
                 f"{business['business_code']} / {business['business_name']}",
             ],
@@ -4447,7 +4461,7 @@ class MainWindow(QMainWindow):
             f"보고서 {report['report_number']} / {report['pipe_number']} · {version_name}",
             "선택한 버전 작업본의 보고서 정보, 영상, 결함 기록을 자동 저장합니다.",
             [
-                "Pipe1",
+                "PIPE1",
                 context["project_name"],
                 f"{context['business_code']} / {context['business_name']}",
                 f"{report['report_number']} / {report['pipe_number']}",
@@ -5980,12 +5994,15 @@ class MainWindow(QMainWindow):
         return True
 
     def _resolve_default_pipe_png_path(self) -> Optional[str]:
-        cwd_pipe = Path.cwd() / "pipe.png"
-        if cwd_pipe.exists() and cwd_pipe.is_file():
-            return str(cwd_pipe)
+        bundled_pipe = find_resource("pipe.png")
+        if bundled_pipe is not None and bundled_pipe.is_file():
+            return str(bundled_pipe)
         workspace_pipe = self.inspection.storage.workspace_root / "pipe.png"
         if workspace_pipe.exists() and workspace_pipe.is_file():
             return str(workspace_pipe)
+        cwd_pipe = Path.cwd() / "pipe.png"
+        if cwd_pipe.exists() and cwd_pipe.is_file():
+            return str(cwd_pipe)
         return None
 
     def _pdf_report_options(self) -> list[tuple[int, str]]:

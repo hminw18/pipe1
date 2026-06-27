@@ -12,6 +12,7 @@ from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
 from sewerpipe_inspector.licensing.errors import LicenseConfigurationError
 from sewerpipe_inspector.licensing.license_service import LicenseService
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
+from sewerpipe_inspector.resources import resource_path_candidates
 
 
 CLIENT_ENV_FILE_ENV = "PIPE1_CLIENT_ENV_FILE"
@@ -69,7 +70,10 @@ def _load_env_file_values(environ: Mapping[str, str] | None) -> dict[str, str]:
         return _parse_env_file(Path(explicit_path))
     if environ is not None:
         return {}
-    for path in (DEFAULT_CLIENT_ENV_PATH, EXAMPLE_CLIENT_ENV_PATH):
+    candidates: list[Path] = []
+    for relative_path in (DEFAULT_CLIENT_ENV_PATH, EXAMPLE_CLIENT_ENV_PATH):
+        candidates.extend(resource_path_candidates(relative_path))
+    for path in candidates:
         values = _parse_env_file(path)
         if values:
             return values
