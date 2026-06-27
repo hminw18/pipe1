@@ -196,15 +196,11 @@ def run() -> None:
 
     workspace: Path | None = None
     workspace_from_saved_default = False
-    if settings.default_workspace:
+    if settings.default_workspace and not settings.always_show_directory_picker:
         candidate = Path(settings.default_workspace).expanduser()
         if _ensure_workspace_dir(candidate):
             workspace = candidate
             workspace_from_saved_default = True
-            if settings.always_show_directory_picker:
-                settings.always_show_directory_picker = False
-                settings.suppress_default_workspace_prompt = True
-                save_settings(settings)
 
     if workspace is None:
         default_root = _default_workspace_root()
@@ -273,7 +269,12 @@ def run() -> None:
         inspection = InspectionService(
             db, storage, report, training_upload_service=training_upload_service
         )
-        window = MainWindow(db, inspection)
+        window = MainWindow(
+            db,
+            inspection,
+            license_status=license_status,
+            license_config=license_config,
+        )
         if license_status is not None and license_status.masked_license_key:
             window.statusBar().showMessage(
                 f"라이선스 활성화됨: {license_status.masked_license_key}"

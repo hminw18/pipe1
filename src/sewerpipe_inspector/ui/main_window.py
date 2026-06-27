@@ -5,7 +5,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import cv2
 from PySide6.QtCore import (
@@ -103,7 +103,12 @@ from sewerpipe_inspector.ui.dialogs import (
     ReportDialog,
     ReportExportDialog,
 )
+from sewerpipe_inspector.ui.settings_dialog import SettingsDialog
 from sewerpipe_inspector.ui.widgets import TimelineSlider
+
+if TYPE_CHECKING:
+    from sewerpipe_inspector.licensing.config import LicenseRuntimeConfig
+    from sewerpipe_inspector.licensing.license_service import LicenseStatus
 
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
@@ -179,6 +184,19 @@ QLabel#sidebarBrand {
     color: #ffffff;
     font-size: 24px;
     font-weight: 800;
+}
+QToolButton#sidebarSettingsButton {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 0;
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: 700;
+    padding: 0;
+}
+QToolButton#sidebarSettingsButton:hover {
+    background-color: #34486d;
+    border: 1px solid #5b7191;
 }
 QLabel#sidebarSubtitle {
     background-color: transparent;
@@ -1607,13 +1625,40 @@ class StableImageLabel(QLabel):
         painter.end()
 
 
+def _build_sidebar_settings_icon() -> QIcon:
+    pixmap = QPixmap(28, 28)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#ffffff"), 2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(QColor("#ffffff"))
+
+    for y, knob_x in ((8, 18), (14, 10), (20, 16)):
+        painter.drawLine(6, y, 22, y)
+        painter.drawEllipse(QPointF(knob_x, y), 2.8, 2.8)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 class MainWindow(QMainWindow):
     def __init__(
-        self, db: Database, inspection: InspectionService, parent=None
+        self,
+        db: Database,
+        inspection: InspectionService,
+        *,
+        license_status: LicenseStatus | None = None,
+        license_config: LicenseRuntimeConfig | None = None,
+        parent=None,
     ) -> None:
         super().__init__(parent)
         self.db = db
         self.inspection = inspection
+        self.license_status = license_status
+        self.license_config = license_config
         self.logger = logging.getLogger(self.__class__.__name__)
 
         self.current_project_id: Optional[int] = None
@@ -1753,11 +1798,27 @@ class MainWindow(QMainWindow):
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(0, 0, 0, 6)
         brand_layout.setSpacing(2)
+        brand_header = QWidget(self)
+        brand_header.setObjectName("brandBlock")
+        brand_header_layout = QHBoxLayout(brand_header)
+        brand_header_layout.setContentsMargins(0, 0, 0, 0)
+        brand_header_layout.setSpacing(6)
         brand_title = QLabel("Pipe1", self)
         brand_title.setObjectName("sidebarBrand")
+        self.settings_button = QToolButton(self)
+        self.settings_button.setObjectName("sidebarSettingsButton")
+        self.settings_button.setToolTip("설정")
+        self.settings_button.setAutoRaise(True)
+        self.settings_button.setFixedSize(28, 28)
+        self.settings_button.setIcon(_build_sidebar_settings_icon())
+        self.settings_button.setIconSize(QSize(22, 22))
+        self.settings_button.clicked.connect(self.open_settings_dialog)
+        brand_header_layout.addWidget(brand_title)
+        brand_header_layout.addStretch(1)
+        brand_header_layout.addWidget(self.settings_button)
         brand_subtitle = QLabel("하수관로 맨홀 조사", self)
         brand_subtitle.setObjectName("sidebarSubtitle")
-        brand_layout.addWidget(brand_title)
+        brand_layout.addWidget(brand_header)
         brand_layout.addWidget(brand_subtitle)
         layout.addWidget(brand)
 
@@ -1785,10 +1846,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.project_nav_group, 1)
         layout.addWidget(self.business_nav_group, 1)
         layout.addWidget(self.report_nav_group, 1)
-        self.workspace_button = QPushButton("작업 폴더 변경", self)
-        self.workspace_button.setObjectName("workspaceButton")
-        self.workspace_button.clicked.connect(self.change_workspace_directory)
-        layout.addWidget(self.workspace_button)
         return panel
 
     def _build_center_panel(self) -> QWidget:
@@ -4144,6 +4201,22 @@ class MainWindow(QMainWindow):
             return False
         selected_kind, selected_id = self._current_navigation_selection()
         return selected_kind == kind and selected_id == entity_id
+
+    def open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(
+            db=self.db,
+            current_workspace=self.inspection.storage.workspace_root,
+            license_status=self.license_status,
+            license_config=self.license_config,
+            training_upload_service=self.inspection.training_upload_service,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        message = "설정이 저장되었습니다."
+        if dialog.training_upload_consent_changed:
+            message = "설정이 저장되었습니다. 학습 데이터 업로드 동의가 변경되었습니다."
+        self.statusBar().showMessage(message, 5000)
 
     def change_workspace_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
