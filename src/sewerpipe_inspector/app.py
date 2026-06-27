@@ -195,10 +195,12 @@ def run() -> None:
     settings = load_settings()
 
     workspace: Path | None = None
+    workspace_from_saved_default = False
     if (not settings.always_show_directory_picker) and settings.default_workspace:
         candidate = Path(settings.default_workspace)
         if _ensure_workspace_dir(candidate):
             workspace = candidate
+            workspace_from_saved_default = True
 
     if workspace is None:
         default_root = _default_workspace_root()
@@ -233,7 +235,11 @@ def run() -> None:
             return
         workspace = Path(root_dir)
 
-    if workspace is not None and not settings.suppress_default_workspace_prompt:
+    if (
+        workspace is not None
+        and not workspace_from_saved_default
+        and not settings.suppress_default_workspace_prompt
+    ):
         ask_default = QMessageBox()
         ask_default.setIcon(QMessageBox.Icon.Question)
         ask_default.setWindowTitle("기본 폴더 설정")
