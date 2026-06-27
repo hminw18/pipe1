@@ -2757,7 +2757,7 @@ class MainWindow(QMainWindow):
             ("3", lambda: self.set_grade("대")),
             ("2", lambda: self.set_grade("중")),
             ("1", lambda: self.set_grade("소")),
-            ("Return", self.save_defect),
+            ("Return", self._save_defect_from_shortcut),
             ("Delete", self.delete_selected_defect),
             (Qt.Key.Key_Left, lambda: self.step_frame(-1)),
             (Qt.Key.Key_Right, lambda: self.step_frame(1)),
@@ -2777,6 +2777,16 @@ class MainWindow(QMainWindow):
         if self._is_typing_in_textbox():
             return
         callback()
+
+    def _save_defect_from_shortcut(self) -> None:
+        if not self._is_report_detail_page_active():
+            return
+        self.save_defect()
+
+    def _is_report_detail_page_active(self) -> bool:
+        if not hasattr(self, "right_stack") or not hasattr(self, "report_detail_page"):
+            return False
+        return self.right_stack.currentWidget() == self.report_detail_page
 
     def _is_typing_in_textbox(self) -> bool:
         focused = QApplication.focusWidget()
