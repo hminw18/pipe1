@@ -4,6 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QStandardPaths
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QFileDialog, QMessageBox
 
@@ -27,6 +28,43 @@ from sewerpipe_inspector.services.training_upload_service import (
 from sewerpipe_inspector.settings_service import load_settings, save_settings
 from sewerpipe_inspector.ui.license_dialog import LicenseActivationDialog
 from sewerpipe_inspector.ui.main_window import MainWindow
+
+DEFAULT_WORKSPACE_DIRNAME = "pipe1"
+
+
+def _default_workspace_root() -> Path:
+    documents = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DocumentsLocation
+    )
+    documents_path = Path(documents) if documents else Path.home() / "Documents"
+    return documents_path / DEFAULT_WORKSPACE_DIRNAME
+
+
+def _ensure_workspace_dir(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        QMessageBox.critical(
+            None,
+            "작업 폴더 오류",
+            f"작업 폴더를 만들 수 없습니다.\n\n{path}\n\n{exc}",
+        )
+        return False
+    if not path.exists() or not path.is_dir():
+        QMessageBox.critical(None, "작업 폴더 오류", f"작업 폴더가 아닙니다.\n\n{path}")
+        return False
+    return True
+
+
+def _ask_use_default_workspace(path: Path) -> bool:
+    result = QMessageBox.question(
+        None,
+        "기본 작업 폴더",
+        f"기본 폴더로 작업폴더를 설정하시겠습니까?\n\n{path}",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes,
+    )
+    return result == QMessageBox.StandardButton.Yes
 
 
 def _apply_application_font(app: QApplication) -> None:
@@ -157,13 +195,31 @@ def run() -> None:
     settings = load_settings()
 
     workspace: Path | None = None
+    workspace_from_saved_default = False
     if (not settings.always_show_directory_picker) and settings.default_workspace:
         candidate = Path(settings.default_workspace)
-        if candidate.exists() and candidate.is_dir():
+        if _ensure_workspace_dir(candidate):
             workspace = candidate
+            workspace_from_saved_default = True
 
     if workspace is None:
-        default_root = Path.home() / "SewerPipeInspectorWorkspace"
+        default_root = _default_workspace_root()
+        if (
+            not settings.always_show_directory_picker
+            and not settings.default_workspace
+            and not settings.suppress_default_workspace_prompt
+            and _ask_use_default_workspace(default_root)
+        ):
+            if not _ensure_workspace_dir(default_root):
+                return
+            workspace = default_root
+            settings.default_workspace = str(workspace)
+            settings.always_show_directory_picker = False
+            settings.suppress_default_workspace_prompt = True
+            save_settings(settings)
+
+    if workspace is None:
+        default_root = _default_workspace_root()
         start_dir = (
             settings.default_workspace
             if settings.default_workspace
@@ -179,7 +235,11 @@ def run() -> None:
             return
         workspace = Path(root_dir)
 
-    if workspace is not None and not settings.suppress_default_workspace_prompt:
+    if (
+        workspace is not None
+        and not workspace_from_saved_default
+        and not settings.suppress_default_workspace_prompt
+    ):
         ask_default = QMessageBox()
         ask_default.setIcon(QMessageBox.Icon.Question)
         ask_default.setWindowTitle("기본 폴더 설정")
