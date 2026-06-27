@@ -197,7 +197,7 @@ def run() -> None:
     workspace: Path | None = None
     workspace_from_saved_default = False
     if settings.default_workspace:
-        candidate = Path(settings.default_workspace)
+        candidate = Path(settings.default_workspace).expanduser()
         if _ensure_workspace_dir(candidate):
             workspace = candidate
             workspace_from_saved_default = True
@@ -208,14 +208,7 @@ def run() -> None:
 
     if workspace is None:
         default_root = _default_workspace_root()
-        if (
-            not settings.default_workspace
-            and (
-                not settings.suppress_default_workspace_prompt
-                or settings.always_show_directory_picker
-            )
-            and _ask_use_default_workspace(default_root)
-        ):
+        if not settings.default_workspace and _ask_use_default_workspace(default_root):
             if not _ensure_workspace_dir(default_root):
                 return
             workspace = default_root
@@ -244,10 +237,7 @@ def run() -> None:
     if (
         workspace is not None
         and not workspace_from_saved_default
-        and (
-            not settings.suppress_default_workspace_prompt
-            or settings.always_show_directory_picker
-        )
+        and not settings.default_workspace
     ):
         ask_default = QMessageBox()
         ask_default.setIcon(QMessageBox.Icon.Question)
