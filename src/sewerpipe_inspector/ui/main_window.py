@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
 import cv2
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QSize, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPoint,
+    QPointF,
+    QRectF,
+    QSize,
+    QThread,
+    QTimer,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QImage,
@@ -35,6 +48,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -91,6 +105,7 @@ TABLE_GRID_COLOR = "#d7dde8"
 VIDEO_FILE_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 VIDEO_DISPLAY_WIDTH = 604
 VIDEO_DISPLAY_HEIGHT = 340
+STOP_ANALYSIS_CANDIDATE_WORKERS = 4
 STOP_SEGMENT_PANEL_DEFAULT_WIDTH = 137
 STOP_SEGMENT_PANEL_MIN_WIDTH = 42
 STOP_SEGMENT_PANEL_MAX_WIDTH = 420
@@ -460,6 +475,11 @@ QLabel#stopSegmentTitle {
     font-size: 13px;
     font-weight: 700;
 }
+QLabel#stopAnalysisStatus {
+    color: #475569;
+    font-size: 11px;
+    padding: 0 8px 2px 8px;
+}
 QWidget#stopSegmentPanel {
     border-top: 1px solid #cfd7e5;
 }
@@ -740,6 +760,165 @@ def format_short_timestamp(timestamp_ms: int) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def analyze_stop_frame_candidate_segment(
+    video_path: str,
+    segment: dict[str, float],
+) -> dict[str, object]:
+    candidate_detector = StopFrameCandidateDetector(
+        StopFrameCandidateDetectionConfig(
+            fps=5.0,
+            max_candidates_per_segment=3,
+            min_stable_duration=0.6,
+            min_candidate_gap=1.2,
+        )
+    )
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+    try:
+        read_started = time.perf_counter()
+        samples = candidate_detector._read_segment_samples(cap, segment)
+        read_seconds = time.perf_counter() - read_started
+    finally:
+        cap.release()
+
+    select_started = time.perf_counter()
+    candidates = candidate_detector._select_candidates(samples, segment)
+    select_seconds = time.perf_counter() - select_started
+
+    output = dict(segment)
+    output["candidates"] = candidates
+    output["analysis_seconds"] = read_seconds + select_seconds
+    output["candidate_read_seconds"] = read_seconds
+    output["candidate_select_seconds"] = select_seconds
+    output["candidate_sample_count"] = len(samples)
+    return output
+
+
+class StopAnalysisWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        video_path: str,
+        depth_roi: tuple[int, int, int, int],
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.video_path = video_path
+        self.depth_roi = depth_roi
+
+    def run(self) -> None:
+        total_started = time.perf_counter()
+        benchmark: dict[str, object] = {
+            "depth_seconds": 0.0,
+            "candidate_seconds": 0.0,
+            "total_seconds": 0.0,
+            "candidate_error": None,
+        }
+
+        def depth_progress(current: int, total: int, message: str) -> None:
+            value = int(max(0, min(45, (current / max(1, total)) * 45)))
+            self.progress.emit(value, message)
+
+        try:
+            self.progress.emit(0, "거리 OCR 준비")
+            depth_detector = DepthOcrStopSegmentDetector(
+                DepthOcrStopDetectionConfig(
+                    fps=1.0,
+                    min_stop_duration=3.0,
+                    stop_distance_tolerance_m=0.5,
+                    merge_gap_threshold=1.0,
+                    max_missing_bridge_seconds=3.0,
+                    min_digit_score=0.5,
+                )
+            )
+            started = time.perf_counter()
+            stop_segments = depth_detector.analyze(
+                self.video_path,
+                self.depth_roi,
+                progress_callback=depth_progress,
+            )
+            benchmark["depth_seconds"] = time.perf_counter() - started
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+
+        candidate_started = time.perf_counter()
+        analyzed_segments: list[dict[str, object]] = []
+        candidate_error: str | None = None
+        try:
+            total_segments = len(stop_segments)
+            self.progress.emit(
+                45,
+                "후보 프레임 병렬 분석 준비"
+                f" · 의심구간 {total_segments}개"
+                f" · 워커 {STOP_ANALYSIS_CANDIDATE_WORKERS}개",
+            )
+            if total_segments == 0:
+                analyzed_segments = []
+            else:
+                completed = 0
+                indexed_results: dict[int, dict[str, object]] = {}
+                max_workers = max(1, min(STOP_ANALYSIS_CANDIDATE_WORKERS, total_segments))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_index = {
+                        executor.submit(
+                            analyze_stop_frame_candidate_segment,
+                            self.video_path,
+                            segment,
+                        ): idx
+                        for idx, segment in enumerate(stop_segments)
+                    }
+                    for future in as_completed(future_to_index):
+                        idx = future_to_index[future]
+                        result = future.result()
+                        indexed_results[idx] = result
+                        completed += 1
+                        self.progress.emit(
+                            45 + int((completed / total_segments) * 55),
+                            "후보 프레임 병렬 분석"
+                            f" {completed}/{total_segments} 완료"
+                            f" · 최근 {float(result.get('analysis_seconds', 0.0)):.2f}s",
+                        )
+                analyzed_segments = [
+                    indexed_results[idx] for idx in range(total_segments)
+                ]
+                benchmark["candidate_workers"] = max_workers
+                benchmark["candidate_segment_seconds_sum"] = sum(
+                    float(segment.get("analysis_seconds", 0.0))
+                    for segment in analyzed_segments
+                )
+                benchmark["candidate_slowest_seconds"] = max(
+                    (
+                        float(segment.get("analysis_seconds", 0.0))
+                        for segment in analyzed_segments
+                    ),
+                    default=0.0,
+                )
+                benchmark["candidate_fastest_seconds"] = min(
+                    (
+                        float(segment.get("analysis_seconds", 0.0))
+                        for segment in analyzed_segments
+                    ),
+                    default=0.0,
+                )
+        except Exception as exc:
+            candidate_error = str(exc)
+            analyzed_segments = [
+                dict(segment, candidates=[], analysis_error=candidate_error)
+                for segment in stop_segments
+            ]
+
+        benchmark["candidate_seconds"] = time.perf_counter() - candidate_started
+        benchmark["candidate_error"] = candidate_error
+        benchmark["total_seconds"] = time.perf_counter() - total_started
+        self.progress.emit(100, "의심구간 분석 완료")
+        self.finished.emit(analyzed_segments, benchmark)
 
 
 def make_player_icon(name: str, size: int = 28) -> QIcon:
@@ -1349,6 +1528,9 @@ class MainWindow(QMainWindow):
         self.is_playing = False
         self.is_user_seeking = False
         self.stop_segments: list[dict[str, float]] = []
+        self.stop_analysis_benchmark: dict[str, object] = {}
+        self.stop_analysis_thread: QThread | None = None
+        self.stop_analysis_worker: StopAnalysisWorker | None = None
         self.stop_segment_panel_width = STOP_SEGMENT_PANEL_DEFAULT_WIDTH
         self._stop_segment_resize_start_width = STOP_SEGMENT_PANEL_DEFAULT_WIDTH
         self._updating_navigation = False
@@ -1732,7 +1914,19 @@ class MainWindow(QMainWindow):
         self.stop_segment_list.itemDoubleClicked.connect(self._seek_to_stop_segment_item)
         self.report_controls.append(self.stop_segment_list)
 
+        self.stop_analysis_status_label = QLabel("", self)
+        self.stop_analysis_status_label.setObjectName("stopAnalysisStatus")
+        self.stop_analysis_status_label.setWordWrap(True)
+        self.stop_analysis_status_label.hide()
+        self.stop_analysis_progress_bar = QProgressBar(self)
+        self.stop_analysis_progress_bar.setRange(0, 100)
+        self.stop_analysis_progress_bar.setTextVisible(True)
+        self.stop_analysis_progress_bar.setFixedHeight(14)
+        self.stop_analysis_progress_bar.hide()
+
         layout.addWidget(self.stop_segment_header)
+        layout.addWidget(self.stop_analysis_status_label)
+        layout.addWidget(self.stop_analysis_progress_bar)
         layout.addWidget(self.stop_segment_list, 1)
         return panel
 
@@ -4247,11 +4441,16 @@ class MainWindow(QMainWindow):
             distance_text = "-" if distance is None else f"{float(distance):.1f} m"
             candidates = seg.get("candidates", [])
             candidate_count = len(candidates) if isinstance(candidates, list) else 0
+            analysis_seconds = self._stop_candidate_value(seg, "analysis_seconds", -1.0)
+            analysis_text = (
+                "" if analysis_seconds < 0 else f" · 분석 {analysis_seconds:.1f}s"
+            )
             item = QListWidgetItem(
                 f"{idx:02d}  {format_short_timestamp(start_ms)}-{format_short_timestamp(end_ms)}\n"
-                f"     {distance_text} · {duration:.1f}s · 후보 {candidate_count}"
+                f"     {distance_text} · {duration:.1f}s · 후보 {candidate_count}{analysis_text}"
             )
-            item.setSizeHint(QSize(0, 46))
+            item.setToolTip(self._stop_segment_debug_tooltip(idx, seg))
+            item.setSizeHint(QSize(0, 54 if analysis_seconds >= 0 else 46))
             item.setData(ROLE_STOP_ITEM_TYPE, "segment")
             item.setData(ROLE_STOP_TIMESTAMP_MS, start_ms)
             self.stop_segment_list.addItem(item)
@@ -4283,6 +4482,38 @@ class MainWindow(QMainWindow):
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _stop_segment_debug_tooltip(
+        self, segment_idx: int, segment: dict[str, object]
+    ) -> str:
+        start_ms = int(float(segment.get("start_time", 0.0)) * 1000)
+        end_ms = int(float(segment.get("end_time", 0.0)) * 1000)
+        distance = segment.get("distance_m")
+        distance_text = "-" if distance is None else f"{float(distance):.1f} m"
+        candidates = segment.get("candidates", [])
+        candidate_count = len(candidates) if isinstance(candidates, list) else 0
+        lines = [
+            f"의심구간 {segment_idx}",
+            f"시간: {format_short_timestamp(start_ms)}-{format_short_timestamp(end_ms)}",
+            f"거리: {distance_text}",
+            f"후보: {candidate_count}개",
+        ]
+        analysis_seconds = self._stop_candidate_value(segment, "analysis_seconds", -1.0)
+        if analysis_seconds >= 0:
+            lines.extend(
+                [
+                    "",
+                    "후보 분석 시간",
+                    f"총: {analysis_seconds:.4f}s",
+                    f"프레임 읽기/전처리: {self._stop_candidate_value(segment, 'candidate_read_seconds'):.4f}s",
+                    f"후보 점수 계산: {self._stop_candidate_value(segment, 'candidate_select_seconds'):.4f}s",
+                    f"샘플 수: {int(self._stop_candidate_value(segment, 'candidate_sample_count'))}",
+                ]
+            )
+        error = segment.get("analysis_error")
+        if error:
+            lines.extend(["", f"후보 분석 오류: {error}"])
+        return "\n".join(lines)
 
     def _stop_candidate_debug_summary(
         self,
@@ -4477,6 +4708,9 @@ class MainWindow(QMainWindow):
         self.update_summary()
 
     def detect_stop_segments(self) -> None:
+        if self.stop_analysis_thread is not None:
+            QMessageBox.information(self, "의심구간", "이미 의심구간 분석이 진행 중입니다.")
+            return
         if self.current_video_path is None:
             QMessageBox.warning(self, "의심구간", "먼저 영상을 선택하세요")
             return
@@ -4484,60 +4718,151 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "의심구간", "먼저 깊이 영역을 저장하세요")
             return
         self.stop_playback()
-        detector = DepthOcrStopSegmentDetector(
-            DepthOcrStopDetectionConfig(
-                fps=1.0,
-                min_stop_duration=3.0,
-                merge_gap_threshold=1.0,
-                max_missing_bridge_seconds=3.0,
-                min_digit_score=0.5,
-            )
+
+        self.detect_stop_button.setEnabled(False)
+        self.detect_stop_button.setText("분석중")
+        self._set_stop_analysis_status("의심구간 분석 준비")
+        if hasattr(self, "stop_analysis_progress_bar"):
+            self.stop_analysis_progress_bar.setValue(0)
+            self.stop_analysis_progress_bar.show()
+
+        thread = QThread(self)
+        worker = StopAnalysisWorker(str(self.current_video_path), self.current_depth_roi)
+        worker.moveToThread(thread)
+        self.stop_analysis_thread = thread
+        self.stop_analysis_worker = worker
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._update_stop_analysis_progress)
+        worker.finished.connect(self._handle_stop_analysis_finished)
+        worker.failed.connect(self._handle_stop_analysis_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_stop_analysis_thread)
+        thread.start()
+
+    def _update_stop_analysis_progress(self, value: int, message: str) -> None:
+        progress_value = max(0, min(100, int(value)))
+        self._set_stop_analysis_status(f"{message} · {progress_value}%")
+        if hasattr(self, "stop_analysis_progress_bar"):
+            self.stop_analysis_progress_bar.setValue(progress_value)
+            self.stop_analysis_progress_bar.show()
+
+    def _handle_stop_analysis_finished(
+        self, stop_segments: object, benchmark: object
+    ) -> None:
+        self.stop_segments = list(stop_segments) if isinstance(stop_segments, list) else []
+        self.stop_analysis_benchmark = (
+            dict(benchmark) if isinstance(benchmark, dict) else {}
         )
-        try:
-            stop_segments = detector.analyze(
-                str(self.current_video_path),
-                self.current_depth_roi,
-            )
-        except Exception as exc:
-            self.logger.exception("Stop segment detection failed")
-            QMessageBox.critical(self, "의심구간 오류", str(exc))
-            return
-        candidate_error: Exception | None = None
-        candidate_detector = StopFrameCandidateDetector(
-            StopFrameCandidateDetectionConfig(
-                fps=5.0,
-                max_candidates_per_segment=3,
-                min_stable_duration=0.6,
-                min_candidate_gap=1.2,
-            )
-        )
-        try:
-            self.stop_segments = candidate_detector.analyze(
-                str(self.current_video_path),
-                stop_segments,
-            )
-        except Exception as exc:
-            self.logger.exception("Stop frame candidate detection failed")
-            candidate_error = exc
-            self.stop_segments = [dict(segment, candidates=[]) for segment in stop_segments]
         self.refresh_defects()
+        self._set_stop_analysis_status(self._format_stop_analysis_benchmark(), show=True)
+        self._finish_stop_analysis_progress()
+
         candidate_count = sum(
             len(seg.get("candidates", []))
             for seg in self.stop_segments
             if isinstance(seg.get("candidates", []), list)
         )
+        candidate_error = self.stop_analysis_benchmark.get("candidate_error")
         if candidate_error is not None:
             QMessageBox.warning(
                 self,
                 "의심구간",
-                f"의심구간 {len(self.stop_segments)}개를 탐지했지만 후보 프레임 분석은 실패했습니다.\n{candidate_error}",
+                "의심구간 "
+                f"{len(self.stop_segments)}개를 탐지했지만 후보 프레임 분석은 실패했습니다.\n"
+                f"{candidate_error}\n\n{self._format_stop_analysis_benchmark()}",
             )
             return
         QMessageBox.information(
             self,
             "의심구간",
-            f"의심구간 {len(self.stop_segments)}개와 후보 프레임 {candidate_count}개를 탐지했습니다.",
+            "의심구간 "
+            f"{len(self.stop_segments)}개와 후보 프레임 {candidate_count}개를 탐지했습니다.\n\n"
+            f"{self._format_stop_analysis_benchmark()}",
         )
+
+    def _handle_stop_analysis_failed(self, error_message: str) -> None:
+        self.logger.error("Stop segment detection failed: %s", error_message)
+        self._set_stop_analysis_status(f"분석 실패: {error_message}", show=True)
+        self._finish_stop_analysis_progress()
+        QMessageBox.critical(self, "의심구간 오류", error_message)
+
+    def _finish_stop_analysis_progress(self) -> None:
+        self.detect_stop_button.setEnabled(True)
+        self.detect_stop_button.setText("분석")
+        if hasattr(self, "stop_analysis_progress_bar"):
+            self.stop_analysis_progress_bar.setValue(100)
+            self.stop_analysis_progress_bar.hide()
+
+    def _clear_stop_analysis_thread(self) -> None:
+        self.stop_analysis_thread = None
+        self.stop_analysis_worker = None
+
+    def _set_stop_analysis_status(self, text: str, *, show: bool = True) -> None:
+        if not hasattr(self, "stop_analysis_status_label"):
+            return
+        self.stop_analysis_status_label.setText(text)
+        self.stop_analysis_status_label.setVisible(show and bool(text))
+
+    def _format_stop_analysis_benchmark(self) -> str:
+        total_seconds = float(self.stop_analysis_benchmark.get("total_seconds") or 0.0)
+        depth_seconds = float(self.stop_analysis_benchmark.get("depth_seconds") or 0.0)
+        candidate_seconds = float(
+            self.stop_analysis_benchmark.get("candidate_seconds") or 0.0
+        )
+        lines = [
+            "소요시간",
+            f"총: {total_seconds:.2f}s",
+            f"거리 OCR: {depth_seconds:.2f}s",
+            f"후보 프레임: {candidate_seconds:.2f}s",
+        ]
+        worker_count = int(self.stop_analysis_benchmark.get("candidate_workers") or 0)
+        if worker_count > 0:
+            segment_sum = float(
+                self.stop_analysis_benchmark.get("candidate_segment_seconds_sum")
+                or 0.0
+            )
+            slowest = float(
+                self.stop_analysis_benchmark.get("candidate_slowest_seconds")
+                or 0.0
+            )
+            fastest = float(
+                self.stop_analysis_benchmark.get("candidate_fastest_seconds")
+                or 0.0
+            )
+            lines.extend(
+                [
+                    f"후보 워커: {worker_count}개",
+                    f"구간별 시간 합계: {segment_sum:.2f}s",
+                    f"가장 느린 구간: {slowest:.2f}s",
+                    f"가장 빠른 구간: {fastest:.2f}s",
+                ]
+            )
+        timed_segments = [
+            (idx, seg)
+            for idx, seg in enumerate(self.stop_segments, start=1)
+            if self._stop_candidate_value(seg, "analysis_seconds", -1.0) >= 0
+        ]
+        if timed_segments:
+            lines.extend(["", "느린 의심구간"])
+            for idx, seg in sorted(
+                timed_segments,
+                key=lambda item: self._stop_candidate_value(
+                    item[1], "analysis_seconds", 0.0
+                ),
+                reverse=True,
+            )[:5]:
+                start_ms = int(float(seg.get("start_time", 0.0)) * 1000)
+                end_ms = int(float(seg.get("end_time", 0.0)) * 1000)
+                lines.append(
+                    f"{idx:02d} {format_short_timestamp(start_ms)}-"
+                    f"{format_short_timestamp(end_ms)}: "
+                    f"{self._stop_candidate_value(seg, 'analysis_seconds'):.2f}s"
+                )
+        return "\n".join(lines)
 
     def generate_excel_report(self) -> None:
         if self.current_report_id is None:
