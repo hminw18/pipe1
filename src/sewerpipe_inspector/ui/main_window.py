@@ -84,6 +84,7 @@ from sewerpipe_inspector.stop_detection import (
     StopFrameCandidateDetectionConfig,
     StopFrameCandidateDetector,
 )
+from sewerpipe_inspector.stop_detection.video_capture import open_analysis_video_capture
 from sewerpipe_inspector.ui.dialogs import (
     AfterReportDialog,
     BusinessDialog,
@@ -774,7 +775,7 @@ def analyze_stop_frame_candidate_segment(
             min_candidate_gap=1.2,
         )
     )
-    cap = cv2.VideoCapture(video_path)
+    cap = open_analysis_video_capture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {video_path}")
     try:
@@ -4441,16 +4442,12 @@ class MainWindow(QMainWindow):
             distance_text = "-" if distance is None else f"{float(distance):.1f} m"
             candidates = seg.get("candidates", [])
             candidate_count = len(candidates) if isinstance(candidates, list) else 0
-            analysis_seconds = self._stop_candidate_value(seg, "analysis_seconds", -1.0)
-            analysis_text = (
-                "" if analysis_seconds < 0 else f" · 분석 {analysis_seconds:.1f}s"
-            )
             item = QListWidgetItem(
                 f"{idx:02d}  {format_short_timestamp(start_ms)}-{format_short_timestamp(end_ms)}\n"
-                f"     {distance_text} · {duration:.1f}s · 후보 {candidate_count}{analysis_text}"
+                f"     {distance_text} · {duration:.1f}s · 후보 {candidate_count}"
             )
             item.setToolTip(self._stop_segment_debug_tooltip(idx, seg))
-            item.setSizeHint(QSize(0, 54 if analysis_seconds >= 0 else 46))
+            item.setSizeHint(QSize(0, 46))
             item.setData(ROLE_STOP_ITEM_TYPE, "segment")
             item.setData(ROLE_STOP_TIMESTAMP_MS, start_ms)
             self.stop_segment_list.addItem(item)
@@ -4498,18 +4495,6 @@ class MainWindow(QMainWindow):
             f"거리: {distance_text}",
             f"후보: {candidate_count}개",
         ]
-        analysis_seconds = self._stop_candidate_value(segment, "analysis_seconds", -1.0)
-        if analysis_seconds >= 0:
-            lines.extend(
-                [
-                    "",
-                    "후보 분석 시간",
-                    f"총: {analysis_seconds:.4f}s",
-                    f"프레임 읽기/전처리: {self._stop_candidate_value(segment, 'candidate_read_seconds'):.4f}s",
-                    f"후보 점수 계산: {self._stop_candidate_value(segment, 'candidate_select_seconds'):.4f}s",
-                    f"샘플 수: {int(self._stop_candidate_value(segment, 'candidate_sample_count'))}",
-                ]
-            )
         error = segment.get("analysis_error")
         if error:
             lines.extend(["", f"후보 분석 오류: {error}"])
@@ -4758,7 +4743,7 @@ class MainWindow(QMainWindow):
             dict(benchmark) if isinstance(benchmark, dict) else {}
         )
         self.refresh_defects()
-        self._set_stop_analysis_status(self._format_stop_analysis_benchmark(), show=True)
+        self._set_stop_analysis_status("", show=False)
         self._finish_stop_analysis_progress()
 
         candidate_count = sum(

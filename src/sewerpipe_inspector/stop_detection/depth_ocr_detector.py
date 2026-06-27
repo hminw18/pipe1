@@ -16,6 +16,7 @@ from .depth_template_data import (
     COMMON_DEPTH_TEMPLATE_SHAPE,
     COMMON_DEPTH_TEMPLATE_ZLIB_BASE64,
 )
+from .video_capture import open_analysis_video_capture
 
 
 BASE_ROI_SIZE = (149, 53)
@@ -436,7 +437,7 @@ class DepthOcrStopSegmentDetector:
         if not path.exists():
             raise FileNotFoundError(str(path))
 
-        cap = cv2.VideoCapture(str(path))
+        cap = open_analysis_video_capture(path)
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
