@@ -499,9 +499,9 @@ Response:
 }
 ```
 
-### 5.4 Internal Admin APIs
+### 5.4 Internal Admin Web
 
-MVP can implement these as CLI commands first. If implemented as HTTP APIs, they must be protected by admin authentication and never exposed publicly without controls.
+The MVP includes an internal `/admin` web portal on the FastAPI server. It is disabled until administrator credentials and a session signing secret are configured.
 
 Required operations:
 
@@ -515,6 +515,38 @@ Required operations:
 - set feature
 - set AI quota
 - inspect AI usage events
+
+Required controls:
+
+- Admin login is required for every `/admin` page.
+- Session cookies must be signed, HTTP-only, SameSite strict, and secure in production.
+- Every mutation form must require a CSRF token.
+- TOTP MFA is required for production administrators.
+- Raw license keys must be displayed only immediately after issue or rotation.
+- Admin pages must not be included in OpenAPI schema output.
+- `/admin` must be protected by a reverse-proxy IP allowlist, VPN, or equivalent private access rule.
+- Admin login attempts must be rate limited.
+- Admin login success, failure, and rate-limit events must be written to the audit log.
+- Production must use `PIPE1_ADMIN_PASSWORD_HASH`; plaintext `PIPE1_ADMIN_PASSWORD` is development-only.
+- Production responses must include security headers such as CSP, `X-Frame-Options`, `X-Content-Type-Options`, referrer policy, permissions policy, and HSTS.
+
+Required environment:
+
+```bash
+PIPE1_ADMIN_USERNAME=admin
+PIPE1_ADMIN_PASSWORD_HASH=pbkdf2_sha256:...
+PIPE1_ADMIN_SESSION_SECRET=long-random-secret-at-least-32-chars
+PIPE1_ADMIN_TOTP_SECRET=required-base32-secret-in-production
+PIPE1_ADMIN_ALLOWED_IPS="203.0.113.10/32 10.0.0.0/8"
+PIPE1_ADMIN_LOGIN_RATE_LIMIT_ATTEMPTS=5
+PIPE1_ADMIN_LOGIN_RATE_LIMIT_WINDOW_SECONDS=300
+```
+
+Generate the password hash on the server or a trusted local machine:
+
+```bash
+python -c "from pipe1_license_server.admin_auth import hash_admin_password; import getpass; print(hash_admin_password(getpass.getpass()))"
+```
 
 ## 6. Entitlement Signing
 

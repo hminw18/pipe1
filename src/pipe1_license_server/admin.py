@@ -19,6 +19,8 @@ from pipe1_license_server.models import (
     LicenseUsageQuota,
     LicenseUsageEvent,
     Organization,
+    TrainingSample,
+    TrainingSnapshot,
 )
 from pipe1_license_server.settings import ServerSettings
 
@@ -120,6 +122,141 @@ class AdminService:
                 )
             return organizations
 
+    def get_license_detail(self, license_id: str) -> dict[str, Any] | None:
+        with session_scope(self.settings) as session:
+            license_row = session.get(License, license_id)
+            if license_row is None:
+                return None
+            organization = license_row.organization
+            keys = session.execute(
+                select(LicenseKey)
+                .where(LicenseKey.license_id == license_id)
+                .order_by(LicenseKey.issued_at.desc())
+            ).scalars()
+            devices = session.execute(
+                select(DeviceActivation)
+                .where(DeviceActivation.license_id == license_id)
+                .order_by(DeviceActivation.activated_at.desc())
+            ).scalars()
+            features = session.execute(
+                select(LicenseFeature)
+                .where(LicenseFeature.license_id == license_id)
+                .order_by(LicenseFeature.feature_key.asc())
+            ).scalars()
+            quotas = session.execute(
+                select(LicenseUsageQuota)
+                .where(LicenseUsageQuota.license_id == license_id)
+                .order_by(LicenseUsageQuota.feature_key.asc())
+            ).scalars()
+            usage_events = session.execute(
+                select(LicenseUsageEvent)
+                .where(LicenseUsageEvent.license_id == license_id)
+                .order_by(LicenseUsageEvent.created_at.desc())
+                .limit(50)
+            ).scalars()
+            training_snapshots = session.execute(
+                select(TrainingSnapshot)
+                .where(TrainingSnapshot.license_id == license_id)
+                .order_by(TrainingSnapshot.created_at.desc())
+                .limit(50)
+            ).scalars()
+            active_devices = session.scalar(
+                select(func.count(DeviceActivation.id)).where(
+                    DeviceActivation.license_id == license_id,
+                    DeviceActivation.status == "active",
+                )
+            )
+            return {
+                "id": license_row.id,
+                "organization_id": organization.id,
+                "organization_name": organization.name,
+                "organization_status": organization.status,
+                "plan": license_row.plan,
+                "status": license_row.status,
+                "seat_model": license_row.seat_model,
+                "device_limit": license_row.device_limit,
+                "active_devices": int(active_devices or 0),
+                "starts_at": _iso(license_row.starts_at),
+                "expires_at": _iso(license_row.expires_at),
+                "offline_grace_days": license_row.offline_grace_days,
+                "created_at": _iso(license_row.created_at),
+                "keys": [
+                    {
+                        "id": key.id,
+                        "key_prefix": key.key_prefix,
+                        "status": key.status,
+                        "key_type": key.key_type,
+                        "issued_at": _iso(key.issued_at),
+                        "last_used_at": _iso(key.last_used_at),
+                        "revoked_at": _iso(key.revoked_at),
+                        "replaced_by_key_id": key.replaced_by_key_id,
+                    }
+                    for key in keys
+                ],
+                "devices": [
+                    {
+                        "id": device.id,
+                        "device_id": device.device_id,
+                        "device_name": device.device_name,
+                        "os_name": device.os_name,
+                        "os_version": device.os_version,
+                        "app_version": device.app_version,
+                        "status": device.status,
+                        "activated_at": _iso(device.activated_at),
+                        "last_validated_at": _iso(device.last_validated_at),
+                        "deactivated_at": _iso(device.deactivated_at),
+                    }
+                    for device in devices
+                ],
+                "features": [
+                    {
+                        "id": feature.id,
+                        "feature_key": feature.feature_key,
+                        "enabled": feature.enabled,
+                        "metadata": feature.metadata_json or {},
+                    }
+                    for feature in features
+                ],
+                "quotas": [
+                    {
+                        "id": quota.id,
+                        "feature_key": quota.feature_key,
+                        "period": quota.period,
+                        "unit": quota.unit,
+                        "limit": quota.limit,
+                        "used": quota.used,
+                        "remaining": max(0, quota.limit - quota.used),
+                        "reset_at": _iso(quota.reset_at),
+                        "overage_policy": quota.overage_policy,
+                    }
+                    for quota in quotas
+                ],
+                "usage_events": [
+                    {
+                        "id": event.id,
+                        "feature_key": event.feature_key,
+                        "quantity": event.quantity,
+                        "unit": event.unit,
+                        "request_id": event.request_id,
+                        "metadata": event.metadata_json or {},
+                        "created_at": _iso(event.created_at),
+                    }
+                    for event in usage_events
+                ],
+                "training_snapshots": [
+                    {
+                        "id": snapshot.id,
+                        "device_id": snapshot.device_id,
+                        "local_report_id": snapshot.local_report_id,
+                        "export_type": snapshot.export_type,
+                        "status": snapshot.status,
+                        "created_at": _iso(snapshot.created_at),
+                        "completed_at": _iso(snapshot.completed_at),
+                    }
+                    for snapshot in training_snapshots
+                ],
+            }
+
     def create_license(
         self,
         *,
@@ -218,6 +355,11 @@ class AdminService:
                         DeviceActivation.license_id == row.id
                     )
                 )
+                key_count = session.scalar(
+                    select(func.count(LicenseKey.id)).where(
+                        LicenseKey.license_id == row.id
+                    )
+                )
                 licenses.append(
                     {
                         "id": row.id,
@@ -229,6 +371,7 @@ class AdminService:
                         "device_limit": row.device_limit,
                         "active_devices": int(active_devices or 0),
                         "total_devices": int(total_devices or 0),
+                        "key_count": int(key_count or 0),
                         "starts_at": _iso(row.starts_at),
                         "expires_at": _iso(row.expires_at),
                         "offline_grace_days": row.offline_grace_days,
@@ -305,7 +448,9 @@ class AdminService:
                 for row in rows
             ]
 
-    def revoke_license_key(self, key_prefix: str, *, actor: str = "developer") -> None:
+    def revoke_license_key(
+        self, key_prefix: str, *, actor: str = "developer", reason: str | None = None
+    ) -> None:
         with session_scope(self.settings) as session:
             key = session.execute(
                 select(LicenseKey).where(LicenseKey.key_prefix == key_prefix)
@@ -321,7 +466,7 @@ class AdminService:
                     action="license_key.revoke",
                     target_type="license_key",
                     target_id=key.id,
-                    metadata_json={"key_prefix": key_prefix},
+                    metadata_json={"key_prefix": key_prefix, "reason": reason},
                 )
             )
 
@@ -368,7 +513,7 @@ class AdminService:
         return raw_key
 
     def deactivate_device(
-        self, activation_id: str, *, actor: str = "developer"
+        self, activation_id: str, *, actor: str = "developer", reason: str | None = None
     ) -> None:
         with session_scope(self.settings) as session:
             activation = session.get(DeviceActivation, activation_id)
@@ -386,6 +531,7 @@ class AdminService:
                     metadata_json={
                         "license_id": activation.license_id,
                         "device_id": activation.device_id,
+                        "reason": reason,
                     },
                 )
             )
@@ -614,10 +760,33 @@ class AdminService:
                 for event in events
             ]
 
+    def record_audit_event(
+        self,
+        *,
+        actor: str,
+        action: str,
+        target_type: str,
+        target_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        event_id = _new_id("audit")
+        with session_scope(self.settings) as session:
+            session.add(
+                AdminAuditEvent(
+                    id=event_id,
+                    actor=actor,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    metadata_json=metadata or {},
+                )
+            )
+        return event_id
+
     def list_audit_events(self) -> list[dict[str, Any]]:
         with session_scope(self.settings) as session:
             events = session.execute(
-                select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.asc())
+                select(AdminAuditEvent).order_by(AdminAuditEvent.created_at.desc())
             ).scalars()
             return [
                 {
@@ -631,3 +800,33 @@ class AdminService:
                 }
                 for event in events
             ]
+
+    def list_training_snapshots(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with session_scope(self.settings) as session:
+            snapshots = session.execute(
+                select(TrainingSnapshot)
+                .order_by(TrainingSnapshot.created_at.desc())
+                .limit(limit)
+            ).scalars()
+            result: list[dict[str, Any]] = []
+            for snapshot in snapshots:
+                sample_count = session.scalar(
+                    select(func.count(TrainingSample.id)).where(
+                        TrainingSample.snapshot_id == snapshot.id
+                    )
+                )
+                result.append(
+                    {
+                        "id": snapshot.id,
+                        "license_id": snapshot.license_id,
+                        "device_id": snapshot.device_id,
+                        "local_report_id": snapshot.local_report_id,
+                        "report_fingerprint": snapshot.report_fingerprint,
+                        "export_type": snapshot.export_type,
+                        "status": snapshot.status,
+                        "sample_count": int(sample_count or 0),
+                        "created_at": _iso(snapshot.created_at),
+                        "completed_at": _iso(snapshot.completed_at),
+                    }
+                )
+            return result

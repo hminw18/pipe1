@@ -13,6 +13,14 @@ class ServerSettings(BaseSettings):
     max_training_image_pixels: int = 12_000_000
     activation_rate_limit_attempts: int = 30
     activation_rate_limit_window_seconds: int = 60
+    admin_username: str | None = None
+    admin_password_hash: str | None = None
+    admin_password: str | None = None
+    admin_totp_secret: str | None = None
+    admin_session_secret: str | None = None
+    admin_session_ttl_seconds: int = 8 * 60 * 60
+    admin_login_rate_limit_attempts: int = 5
+    admin_login_rate_limit_window_seconds: int = 5 * 60
 
     model_config = SettingsConfigDict(
         env_prefix="PIPE1_",
