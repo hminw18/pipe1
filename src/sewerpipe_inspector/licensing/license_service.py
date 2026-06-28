@@ -6,6 +6,7 @@ from typing import Any
 from sewerpipe_inspector.licensing.api_client import LicenseApiClientProtocol
 from sewerpipe_inspector.licensing.device_identity import DeviceIdentity
 from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
+from sewerpipe_inspector.licensing.errors import LicenseApiError, LicenseConnectionError
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
 
 
@@ -82,32 +83,67 @@ class LicenseService:
         entitlement = state.get("entitlement")
         if not isinstance(entitlement, dict):
             return LicenseStatus(status="invalid", reason="missing entitlement")
+
+        activation_id = str(state.get("activation_id") or "")
+        transient_validation_error: str | None = None
+        if validate_online:
+            try:
+                self.verifier.verify(
+                    entitlement,
+                    expected_device_id=device_id,
+                    enforce_time_limits=False,
+                    enforce_license_status=False,
+                )
+            except ValueError as exc:
+                return LicenseStatus(status="invalid", reason=str(exc))
+            if not activation_id:
+                return LicenseStatus(status="invalid", reason="missing activation id")
+            try:
+                response = self.client.validate(
+                    activation_id=activation_id,
+                    device_id=device_id,
+                    app_version=self.app_version,
+                )
+            except LicenseConnectionError as exc:
+                transient_validation_error = str(exc)
+            except LicenseApiError as exc:
+                if not _is_transient_validation_error(exc):
+                    return LicenseStatus(status="invalid", reason=exc.message)
+                transient_validation_error = exc.message
+            else:
+                refreshed = response.get("entitlement")
+                if not isinstance(refreshed, dict):
+                    transient_validation_error = (
+                        "라이선스 서버가 새 인증 정보를 반환하지 않았습니다."
+                    )
+                else:
+                    try:
+                        payload = self.verifier.verify(
+                            refreshed, expected_device_id=device_id
+                        )
+                    except ValueError as exc:
+                        return LicenseStatus(status="invalid", reason=str(exc))
+                    upload_token = response.get(
+                        "device_upload_token", state.get("device_upload_token")
+                    )
+                    self.store.save_activation_state(
+                        activation_id=activation_id,
+                        masked_license_key=str(state.get("masked_license_key") or ""),
+                        entitlement=refreshed,
+                        device_upload_token=upload_token,
+                    )
+                    return self._status_from_payload(
+                        "active",
+                        activation_id,
+                        state.get("masked_license_key"),
+                        payload,
+                        upload_token,
+                    )
+
         try:
             payload = self.verifier.verify(entitlement, expected_device_id=device_id)
         except ValueError as exc:
             return LicenseStatus(status="invalid", reason=str(exc))
-
-        activation_id = str(state.get("activation_id") or "")
-        if validate_online and activation_id:
-            response = self.client.validate(
-                activation_id=activation_id,
-                device_id=device_id,
-                app_version=self.app_version,
-            )
-            refreshed = response.get("entitlement")
-            if isinstance(refreshed, dict):
-                payload = self.verifier.verify(refreshed, expected_device_id=device_id)
-                self.store.save_activation_state(
-                    activation_id=activation_id,
-                    masked_license_key=str(state.get("masked_license_key") or ""),
-                    entitlement=refreshed,
-                    device_upload_token=response.get(
-                        "device_upload_token", state.get("device_upload_token")
-                    ),
-                )
-                state["device_upload_token"] = response.get(
-                    "device_upload_token", state.get("device_upload_token")
-                )
 
         return self._status_from_payload(
             "active",
@@ -115,6 +151,7 @@ class LicenseService:
             state.get("masked_license_key"),
             payload,
             state.get("device_upload_token"),
+            reason=transient_validation_error,
         )
 
     @staticmethod
@@ -124,6 +161,8 @@ class LicenseService:
         masked_license_key: str | None,
         payload: dict[str, Any],
         device_upload_token: str | None,
+        *,
+        reason: str | None = None,
     ) -> LicenseStatus:
         features = {
             str(key): bool(value)
@@ -132,9 +171,14 @@ class LicenseService:
         return LicenseStatus(
             status=status,
             activation_id=activation_id,
+            reason=reason,
             masked_license_key=masked_license_key,
             license_id=payload.get("license_id"),
             device_upload_token=device_upload_token,
             features=features,
             payload=payload,
         )
+
+
+def _is_transient_validation_error(exc: LicenseApiError) -> bool:
+    return exc.status_code in {408, 429} or exc.status_code >= 500

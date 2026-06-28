@@ -13,5 +13,9 @@ class LicenseApiError(LicenseError):
         self.status_code = status_code
 
 
+class LicenseConnectionError(LicenseError):
+    pass
+
+
 class LicenseConfigurationError(LicenseError):
     pass

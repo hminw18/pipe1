@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from sewerpipe_inspector.licensing.errors import LicenseApiError
+from sewerpipe_inspector.licensing.errors import LicenseApiError, LicenseConnectionError
 
 
 class LicenseApiClientProtocol(Protocol):
@@ -47,20 +47,23 @@ class HttpLicenseApiClient:
         os_version: str,
         app_version: str,
     ) -> dict:
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/licenses/activate",
-                json={
-                    "license_key": license_key,
-                    "device_id": device_id,
-                    "device_name": device_name,
-                    "os_name": os_name,
-                    "os_version": os_version,
-                    "app_version": app_version,
-                },
-            )
-            _raise_for_status(response)
-            return response.json()
+        try:
+            with httpx.Client(timeout=self.timeout_seconds) as client:
+                response = client.post(
+                    f"{self.base_url}/licenses/activate",
+                    json={
+                        "license_key": license_key,
+                        "device_id": device_id,
+                        "device_name": device_name,
+                        "os_name": os_name,
+                        "os_version": os_version,
+                        "app_version": app_version,
+                    },
+                )
+        except httpx.RequestError as exc:
+            raise LicenseConnectionError("라이선스 서버에 연결할 수 없습니다.") from exc
+        _raise_for_status(response)
+        return response.json()
 
     def validate(
         self,
@@ -69,17 +72,20 @@ class HttpLicenseApiClient:
         device_id: str,
         app_version: str,
     ) -> dict:
-        with httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(
-                f"{self.base_url}/licenses/validate",
-                json={
-                    "activation_id": activation_id,
-                    "device_id": device_id,
-                    "app_version": app_version,
-                },
-            )
-            _raise_for_status(response)
-            return response.json()
+        try:
+            with httpx.Client(timeout=self.timeout_seconds) as client:
+                response = client.post(
+                    f"{self.base_url}/licenses/validate",
+                    json={
+                        "activation_id": activation_id,
+                        "device_id": device_id,
+                        "app_version": app_version,
+                    },
+                )
+        except httpx.RequestError as exc:
+            raise LicenseConnectionError("라이선스 서버에 연결할 수 없습니다.") from exc
+        _raise_for_status(response)
+        return response.json()
 
 
 def _raise_for_status(response: httpx.Response) -> None:

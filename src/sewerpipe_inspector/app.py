@@ -112,7 +112,7 @@ def _ensure_license_activation() -> (
         QMessageBox.critical(None, "라이선스 설정 오류", str(exc))
         return None
 
-    status = service.current_status()
+    status = service.current_status(validate_online=True)
     if status.status == "active":
         return service, status, config
     if not config.require_activation:

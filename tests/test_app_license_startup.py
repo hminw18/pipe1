@@ -6,7 +6,11 @@ from sewerpipe_inspector.licensing.license_service import LicenseStatus
 
 
 class _InactiveLicenseService:
-    def current_status(self) -> LicenseStatus:
+    def __init__(self) -> None:
+        self.validate_online: bool | None = None
+
+    def current_status(self, *, validate_online: bool = False) -> LicenseStatus:
+        self.validate_online = validate_online
         return LicenseStatus(status="inactive", reason="license is not activated")
 
 
@@ -39,3 +43,4 @@ def test_dev_mode_does_not_prompt_for_activation_when_server_is_configured(
     assert license_service is service
     assert license_status is None
     assert license_config is config
+    assert service.validate_online is True

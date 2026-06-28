@@ -77,11 +77,11 @@ The main app should depend on `LicenseService`, not on raw HTTP functions.
 
 1. App starts.
 2. App loads cached entitlement.
-3. App verifies entitlement signature locally.
-4. If entitlement is valid and within offline grace, app starts without blocking on network.
-5. If background validation is due, app validates asynchronously after the main window is available.
-6. If validation succeeds, app stores fresh entitlement.
-7. If validation fails due to network, app keeps the last valid entitlement until grace expiry.
+3. App verifies the cached entitlement signature and device binding locally.
+4. App validates the activation with the license server before production use.
+5. If validation succeeds, app stores the fresh entitlement and upload token.
+6. If the server explicitly rejects the activation, license, or organization, app treats the local activation as invalid.
+7. If validation cannot run because the server is unreachable or temporarily unavailable, app keeps the last valid entitlement until grace expiry.
 
 ### 4.3 Grace Expired
 
@@ -437,7 +437,7 @@ Rules:
 
 - Do not ask for workspace selection before required activation unless product policy allows trial/offline demo mode.
 - Do not store license state in selected workspace.
-- Do not require server connection if a valid cached entitlement is inside grace.
+- Do not block startup on temporary validation outages if a valid cached entitlement is still inside grace.
 
 ## 13. Configuration
 

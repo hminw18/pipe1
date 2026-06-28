@@ -20,7 +20,14 @@ class EntitlementVerifier:
     def __init__(self, public_keys: dict[str, str]) -> None:
         self.public_keys = public_keys
 
-    def verify(self, envelope: dict[str, Any], *, expected_device_id: str) -> dict[str, Any]:
+    def verify(
+        self,
+        envelope: dict[str, Any],
+        *,
+        expected_device_id: str,
+        enforce_time_limits: bool = True,
+        enforce_license_status: bool = True,
+    ) -> dict[str, Any]:
         try:
             payload = verify_entitlement_envelope(envelope, self.public_keys)
         except SignatureVerificationError as exc:
@@ -29,13 +36,14 @@ class EntitlementVerifier:
         if payload.get("device_id") != expected_device_id:
             raise ValueError("entitlement device does not match this device")
 
-        now = datetime.now(UTC)
-        expires_at = _parse_datetime(payload.get("expires_at"))
-        if expires_at is not None and now > expires_at:
-            raise ValueError("license entitlement is expired")
-        grace_until = _parse_datetime(payload.get("offline_grace_until"))
-        if grace_until is not None and now > grace_until:
-            raise ValueError("offline grace period has expired")
-        if payload.get("license_status") != "active":
+        if enforce_time_limits:
+            now = datetime.now(UTC)
+            expires_at = _parse_datetime(payload.get("expires_at"))
+            if expires_at is not None and now > expires_at:
+                raise ValueError("license entitlement is expired")
+            grace_until = _parse_datetime(payload.get("offline_grace_until"))
+            if grace_until is not None and now > grace_until:
+                raise ValueError("offline grace period has expired")
+        if enforce_license_status and payload.get("license_status") != "active":
             raise ValueError("license is not active")
         return payload
