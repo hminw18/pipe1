@@ -10,13 +10,14 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from pipe1_license_server.admin import hash_license_key
+from pipe1_license_server.admin_web import create_admin_router
 from pipe1_license_server.db import create_session_factory, init_db
 from pipe1_license_server.models import (
     DeviceActivation,
@@ -158,6 +159,14 @@ def create_app(settings: ServerSettings | None = None) -> FastAPI:
         redoc_url=None if disable_docs else "/redoc",
         openapi_url=None if disable_docs else "/openapi.json",
     )
+
+    @app.middleware("http")
+    async def add_security_headers(request: Request, call_next: Any) -> Response:
+        response = await call_next(request)
+        _set_security_headers(response, production=settings.app_env == "production")
+        return response
+
+    app.include_router(create_admin_router(settings))
     activation_attempts: dict[tuple[str, str], list[float]] = {}
 
     def get_session() -> Session:
@@ -525,6 +534,32 @@ def _training_authorization_error(
             403,
         )
     return None
+
+
+def _set_security_headers(response: Response, *, production: bool) -> None:
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        (
+            "default-src 'none'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self'; "
+            "form-action 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'"
+        ),
+    )
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    if production:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
 
 
 def _training_identity_authorization_error(
