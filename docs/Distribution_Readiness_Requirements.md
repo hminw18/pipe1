@@ -82,7 +82,7 @@ Entitlement answers:
 
 ### 3.2 Initial No-Portal Licensing Model
 
-Implementation details live in `docs/License_Server_MVP_Implementation.md`.
+Implementation details live in the license server repository's `docs/License_Server_MVP_Implementation.md`.
 
 The first commercial version may ship without an admin web portal.
 

@@ -2,21 +2,13 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from typing import Any
 
-from fastapi.testclient import TestClient
-
-from pipe1_license_server.admin import AdminService
-from pipe1_license_server.app import create_app
-from pipe1_license_server.settings import ServerSettings
-from pipe1_license_server.signing import generate_private_key_b64
 from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, MANHOLE_FIELDS, REPORT_FIELDS, Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
 from sewerpipe_inspector.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
-from sewerpipe_inspector.services.training_upload_service import (
-    TrainingUploadClient,
-    TrainingUploadService,
-)
+from sewerpipe_inspector.services.training_upload_service import TrainingUploadService
 
 
 PNG_1X1 = base64.b64decode(
@@ -24,39 +16,29 @@ PNG_1X1 = base64.b64decode(
 )
 
 
-def _server(tmp_path: Path) -> tuple[TestClient, str, str, str]:
-    settings = ServerSettings(
-        database_url=f"sqlite+pysqlite:///{tmp_path / 'server.db'}",
-        signing_private_key=generate_private_key_b64(),
-        signing_key_id="test-key",
-        app_env="test",
-    )
-    app = create_app(settings)
-    admin = AdminService(settings)
-    org_id = admin.create_organization("Training Co", None)
-    license_id = admin.create_license(
-        organization_id=org_id,
-        plan="standard",
-        device_limit=3,
-        expires_at="2027-06-30T23:59:59Z",
-        features={"training_upload": True, "local_report": True},
-    )
-    raw_key = admin.generate_license_key(license_id)
-    client = TestClient(app)
-    device_id = "pipe1-dev-training"
-    activation = client.post(
-        "/licenses/activate",
-        json={
-            "license_key": raw_key,
-            "device_id": device_id,
-            "device_name": "training-pc",
-            "os_name": "Windows",
-            "os_version": "11",
-            "app_version": "0.1.0",
-        },
-    )
-    assert activation.status_code == 200, activation.text
-    return client, license_id, device_id, activation.json()["device_upload_token"]
+class RecordingTrainingUploadClient:
+    def __init__(self) -> None:
+        self.consents: list[dict[str, Any]] = []
+        self.snapshots: list[dict[str, Any]] = []
+        self.samples: list[dict[str, Any]] = []
+        self.completed: list[str] = []
+        self.upload_token: str | None = None
+
+    def record_consent(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.consents.append(payload)
+        return {"status": "ok"}
+
+    def create_snapshot(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.snapshots.append(payload)
+        return {"snapshot_id": f"snap_{len(self.snapshots)}"}
+
+    def upload_sample(self, snapshot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.samples.append({"snapshot_id": snapshot_id, **payload})
+        return {"sample_id": f"sample_{len(self.samples)}"}
+
+    def complete_snapshot(self, snapshot_id: str) -> dict[str, Any]:
+        self.completed.append(snapshot_id)
+        return {"status": "complete"}
 
 
 def _make_report(db: Database, tmp_path: Path) -> int:
@@ -88,7 +70,10 @@ def _make_report(db: Database, tmp_path: Path) -> int:
     db.update_pipe_information(report_id, 20.0, 20.0)
     db.update_actual_survey(
         report_id,
-        {field: ("없음" if field.endswith("undriven_reason") else None) for field in ACTUAL_SURVEY_FIELDS},
+        {
+            field: ("없음" if field.endswith("undriven_reason") else None)
+            for field in ACTUAL_SURVEY_FIELDS
+        },
     )
     capture = tmp_path / "capture.png"
     capture.write_bytes(PNG_1X1)
@@ -114,16 +99,14 @@ def _make_report(db: Database, tmp_path: Path) -> int:
 def test_report_generation_queues_training_snapshot_and_uploads(
     tmp_path: Path,
 ) -> None:
-    server_client, license_id, device_id, upload_token = _server(tmp_path)
     db = Database(tmp_path / "app.db")
     storage = StorageService(tmp_path / "workspace")
+    client = RecordingTrainingUploadClient()
     training_upload = TrainingUploadService(
         db,
-        client=TrainingUploadClient.from_test_client(
-            server_client, upload_token=upload_token
-        ),
-        license_id=license_id,
-        device_id=device_id,
+        client=client,  # type: ignore[arg-type]
+        license_id="lic_desktop",
+        device_id="pipe1-dev-training",
         consent_enabled=True,
         consent_version="2026-06-25",
     )
@@ -144,7 +127,6 @@ def test_report_generation_queues_training_snapshot_and_uploads(
     assert len(samples) == 1
     assert "memo should not upload" not in samples[0]["payload_json"]
 
-    # Regenerating an unchanged report should not duplicate the snapshot.
     inspection.generate_excel_report(report_id)
     assert len(db.list_training_upload_snapshots(report_id)) == 1
 
@@ -152,12 +134,9 @@ def test_report_generation_queues_training_snapshot_and_uploads(
 
     uploaded = db.list_training_upload_snapshots(report_id)[0]
     assert uploaded["status"] == "uploaded"
-    assert uploaded["server_snapshot_id"]
-    server_snapshot = server_client.get(
-        f"/training/snapshots/{uploaded['server_snapshot_id']}",
-        headers={"Authorization": f"Bearer {upload_token}"},
-    )
-    assert server_snapshot.status_code == 200
-    body = server_snapshot.json()
-    assert body["sample_count"] == 1
-    assert body["samples"][0]["labels"]["defect_item"] == "균열(길이)"
+    assert uploaded["server_snapshot_id"] == "snap_1"
+    assert client.consents[0]["license_id"] == "lic_desktop"
+    assert client.snapshots[0]["local_report_id"] == str(report_id)
+    assert client.samples[0]["labels"]["defect_item"] == "균열(길이)"
+    assert client.samples[0]["image_base64"]
+    assert client.completed == ["snap_1"]

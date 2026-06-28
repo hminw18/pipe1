@@ -4,7 +4,7 @@
 
 This document defines the standard implementation scope for license activation in the Pipe1 desktop app.
 
-This is the desktop-side counterpart to `docs/License_Server_MVP_Implementation.md`.
+This is the desktop-side counterpart to the license server repository's `docs/License_Server_MVP_Implementation.md`.
 
 The goal is to let field users activate Pipe1 with a license key once, then keep using the app locally without routine login prompts.
 
@@ -560,4 +560,3 @@ Manual Windows tests:
 - Which Ed25519 library to use.
 - Exact background validation interval.
 - Whether server validation should happen on every successful report generation.
-
