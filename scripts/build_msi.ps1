@@ -254,11 +254,12 @@ try {
         }
 
         Invoke-Checked -FilePath $ResolvedWix -Arguments @("--version") -FailureMessage "WiX CLI version check failed."
-        Ensure-WixExtension -ResolvedWixExe $ResolvedWix -ExtensionRef "WixToolset.UI.wixext/7.0.0"
 
         $WixSource = Join-Path $Root.Path "packaging\wix\Pipe1Inspector.wxs"
+        $WixUiSource = Join-Path $Root.Path "packaging\wix\Pipe1Ui.wxs"
         $WixLicenseRtf = Join-Path $Root.Path "packaging\wix\License.rtf"
         $WixIcon = Join-Path $Root.Path "packaging\assets\pipe1.ico"
+        $WixBannerBmp = Join-Path $Root.Path "packaging\assets\wix-banner.bmp"
         $OutputDir = Join-Path $Root.Path $OutputPath
         $IntermediateDir = Join-Path $Root.Path "build\wix"
         $MsiPath = Join-Path $OutputDir "PIPE1-$MsiVersion.msi"
@@ -269,14 +270,15 @@ try {
         $WixArgs = @(
             "build",
             $WixSource,
+            $WixUiSource,
             "-arch", "x64",
-            "-ext", "WixToolset.UI.wixext",
             "-d", "SourceDir=$SourceDir",
             "-d", "AppName=PIPE1",
             "-d", "Manufacturer=PIPE1",
             "-d", "AppVersion=$MsiVersion",
             "-d", "WixLicenseRtf=$WixLicenseRtf",
             "-d", "WixIcon=$WixIcon",
+            "-d", "WixBannerBmp=$WixBannerBmp",
             "-intermediateFolder", $IntermediateDir,
             "-out", $MsiPath
         )

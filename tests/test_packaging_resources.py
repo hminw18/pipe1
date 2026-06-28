@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from sewerpipe_inspector import resources
 from sewerpipe_inspector.licensing import config as license_config
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WIX_NS = {"wix": "http://wixtoolset.org/schemas/v4/wxs"}
 
 
 def test_find_resource_checks_pyinstaller_bundle_root(
@@ -71,3 +76,17 @@ def test_license_env_can_load_from_resource_candidates(
     assert config.api_base_url == "https://license.example.com"
     assert config.public_keys == {"kid": "public"}
     assert config.require_activation is True
+
+
+def test_wix_ui_uses_windows_default_korean_text_styles() -> None:
+    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Ui.wxs")
+    styles = tree.findall(".//wix:TextStyle", WIX_NS)
+
+    assert styles
+    assert {style.attrib["FaceName"] for style in styles} == {"맑은 고딕"}
+
+
+def test_wix_installer_does_not_register_system_fonts() -> None:
+    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Inspector.wxs")
+
+    assert tree.find(".//wix:StandardDirectory[@Id='FontsFolder']", WIX_NS) is None

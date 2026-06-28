@@ -1,0 +1,380 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <Binary Id="WixUI_Bmp_Banner" SourceFile="$(var.WixBannerBmp)" />
+    <Binary Id="WixUI_Ico_Info" SourceFile="$(var.WixIcon)" />
+
+    <UI Id="Pipe1Ui">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="맑은 고딕" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="맑은 고딕" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="맑은 고딕" Size="9" Bold="yes" />
+
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="ErrorDialog" Value="ErrorDlg" />
+      <Property Id="WixUIRMOption" Value="UseRM" />
+
+      <Dialog Id="ErrorDlg" Width="270" Height="105" ErrorDialog="yes" Title="PIPE1 설치">
+        <Control Id="ErrorText" Type="Text" X="48" Y="15" Width="205" Height="60" Text="안내 문구" NoPrefix="yes" TabSkip="no" />
+        <Control Id="Y" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="예" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorYes" />
+        </Control>
+        <Control Id="A" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="취소" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorAbort" />
+        </Control>
+        <Control Id="C" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="취소" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorCancel" />
+        </Control>
+        <Control Id="I" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="무시" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorIgnore" />
+        </Control>
+        <Control Id="N" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="아니요" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorNo" />
+        </Control>
+        <Control Id="O" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="확인" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorOk" />
+        </Control>
+        <Control Id="R" Type="PushButton" X="100" Y="80" Width="56" Height="17" Text="다시 시도" TabSkip="yes">
+          <Publish Event="EndDialog" Value="ErrorRetry" />
+        </Control>
+        <Control Id="ErrorIcon" Type="Icon" X="15" Y="15" Width="24" Height="24" Text="WixUI_Ico_Info" FixedSize="yes" IconSize="32" TabSkip="yes" />
+      </Dialog>
+
+      <Dialog Id="FilesInUse" Width="370" Height="270" Title="PIPE1 설치" KeepModeless="yes">
+        <Control Id="Retry" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="다시 시도">
+          <Publish Event="EndDialog" Value="Retry" />
+        </Control>
+        <Control Id="Ignore" Type="PushButton" X="235" Y="243" Width="56" Height="17" Text="무시">
+          <Publish Event="EndDialog" Value="Ignore" />
+        </Control>
+        <Control Id="Exit" Type="PushButton" X="166" Y="243" Width="56" Height="17" Text="종료">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}사용 중인 파일" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="일부 파일이 다른 프로그램에서 사용 중입니다." />
+        <Control Id="Text" Type="Text" X="20" Y="55" Width="330" Height="30" NoPrefix="yes" Text="다음 프로그램을 닫은 뒤 다시 시도를 클릭하세요." />
+        <Control Id="List" Type="ListBox" X="20" Y="87" Width="330" Height="130" Property="FileInUseProcess" Sunken="yes" TabSkip="yes" />
+      </Dialog>
+
+      <Dialog Id="MsiRMFilesInUse" Width="370" Height="270" Title="PIPE1 설치" KeepModeless="yes">
+        <Control Id="OK" Type="PushButton" X="240" Y="243" Width="56" Height="17" Default="yes" Text="확인">
+          <Publish Event="EndDialog" Value="Return" />
+          <Publish Event="RMShutdownAndRestart" Value="0" Condition="WixUIRMOption~=&quot;UseRM&quot;" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="ShutdownOption" Type="RadioButtonGroup" X="26" Y="190" Width="305" Height="45" Property="WixUIRMOption">
+          <RadioButtonGroup Property="WixUIRMOption">
+            <RadioButton Value="UseRM" X="0" Y="0" Width="295" Height="16" Text="자동으로 응용 프로그램을 닫고 다시 시작합니다." />
+            <RadioButton Value="DontUseRM" X="0" Y="20" Width="295" Height="16" Text="응용 프로그램을 닫지 않습니다." />
+          </RadioButtonGroup>
+        </Control>
+        <Control Id="List" Type="ListBox" X="20" Y="100" Width="330" Height="80" Property="FileInUseProcess" Sunken="yes" TabSkip="yes" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}사용 중인 파일" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치를 계속하려면 실행 중인 응용 프로그램을 처리해야 합니다." />
+        <Control Id="Text" Type="Text" X="20" Y="55" Width="330" Height="45" NoPrefix="yes" Text="다음 응용 프로그램이 PIPE1 설치에 필요한 파일을 사용하고 있습니다." />
+      </Dialog>
+
+      <Dialog Id="CancelDlg" Width="260" Height="85" Title="PIPE1 설치">
+        <Control Id="No" Type="PushButton" X="132" Y="57" Width="56" Height="17" Default="yes" Cancel="yes" Text="아니요">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Yes" Type="PushButton" X="72" Y="57" Width="56" Height="17" Text="예">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30" NoPrefix="yes" Text="PIPE1 설치를 취소하시겠습니까?" />
+        <Control Id="Icon" Type="Icon" X="15" Y="15" Width="24" Height="24" FixedSize="yes" IconSize="32" Text="WixUI_Ico_Info" />
+      </Dialog>
+
+      <Dialog Id="WaitForCostingDlg" Width="260" Height="85" Title="PIPE1 설치">
+        <Control Id="Return" Type="PushButton" X="102" Y="57" Width="56" Height="17" Default="yes" Cancel="yes" Text="확인">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="30" NoPrefix="yes" Text="설치 정보를 준비하는 중입니다. 잠시 후 다시 시도하세요." />
+        <Control Id="Icon" Type="Icon" X="15" Y="15" Width="24" Height="24" FixedSize="yes" IconSize="32" Text="WixUI_Ico_Info" />
+      </Dialog>
+
+      <Dialog Id="PrepareDlg" Width="370" Height="270" Title="PIPE1 설치" Modeless="yes">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" TabSkip="yes" Text="&lt; 뒤로" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Disabled="yes" TabSkip="yes" Text="다음 &gt;" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치를 준비하고 있습니다." />
+        <Control Id="Message" Type="Text" X="20" Y="70" Width="330" Height="30" NoPrefix="yes" Text="필요한 정보를 수집하는 중입니다. 잠시 기다려 주세요." />
+        <Control Id="ActionText" Type="Text" X="20" Y="110" Width="330" Height="20" NoPrefix="yes">
+          <Subscribe Event="ActionText" Attribute="Text" />
+        </Control>
+        <Control Id="ActionData" Type="Text" X="20" Y="130" Width="330" Height="50" NoPrefix="yes">
+          <Subscribe Event="ActionData" Attribute="Text" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="Pipe1LicenseDlg" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="다음 &gt;" DisableCondition="LicenseAccepted &lt;&gt; &quot;1&quot;" EnableCondition="LicenseAccepted = &quot;1&quot;">
+          <Publish Event="NewDialog" Value="Pipe1InstallDirDlg" Order="1" Condition="LicenseAccepted = &quot;1&quot;" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="PIPE1을 설치하기 전에 사용 조건을 확인하세요." />
+        <Control Id="Heading" Type="Text" X="20" Y="58" Width="330" Height="12" NoPrefix="yes" Text="{\WixUI_Font_Title}사용권 계약" />
+        <Control Id="LicenseText" Type="ScrollableText" X="20" Y="80" Width="330" Height="116" Sunken="yes" TabSkip="no">
+          <Text SourceFile="$(var.WixLicenseRtf)" />
+        </Control>
+        <Control Id="LicenseAcceptedCheckBox" Type="CheckBox" X="20" Y="207" Width="330" Height="18" CheckBoxValue="1" Property="LicenseAccepted" Text="사용권 계약 조건에 동의합니다." />
+      </Dialog>
+
+      <Dialog Id="Pipe1InstallDirDlg" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="&lt; 뒤로">
+          <Publish Event="NewDialog" Value="Pipe1LicenseDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="다음 &gt;">
+          <Publish Event="CheckTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1" />
+          <Publish Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="2" />
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="3" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="PIPE1을 설치할 위치를 선택하세요." />
+        <Control Id="Heading" Type="Text" X="20" Y="68" Width="330" Height="12" NoPrefix="yes" Text="{\WixUI_Font_Title}대상 폴더" />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="94" Width="330" Height="12" NoPrefix="yes" Text="PIPE1을 다음 폴더에 설치합니다." />
+        <Control Id="Folder" Type="PathEdit" X="20" Y="120" Width="254" Height="18" Property="WIXUI_INSTALLDIR" Indirect="yes" />
+        <Control Id="ChangeFolder" Type="PushButton" X="286" Y="119" Width="64" Height="19" Text="변경...">
+          <Publish Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1" />
+          <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+        </Control>
+      </Dialog>
+
+      <Dialog Id="BrowseDlg" Width="370" Height="270" Title="설치 폴더 선택">
+        <Control Id="PathEdit" Type="PathEdit" X="25" Y="202" Width="320" Height="18" Property="_BrowseProperty" Indirect="yes" />
+        <Control Id="OK" Type="PushButton" X="240" Y="243" Width="56" Height="17" Default="yes" Text="확인" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="Reset" Value="0" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="ComboLabel" Type="Text" X="25" Y="58" Width="44" Height="10" TabSkip="no" Text="위치:" />
+        <Control Id="DirectoryCombo" Type="DirectoryCombo" X="70" Y="55" Width="220" Height="80" Property="_BrowseProperty" Indirect="yes" Fixed="yes" Remote="yes" />
+        <Control Id="Up" Type="PushButton" X="292" Y="55" Width="26" Height="19" ToolTip="상위 폴더" Text="위로">
+          <Publish Event="DirectoryListUp" Value="0" />
+        </Control>
+        <Control Id="NewFolder" Type="PushButton" X="322" Y="55" Width="36" Height="19" ToolTip="새 폴더" Text="새 폴더">
+          <Publish Event="DirectoryListNew" Value="0" />
+        </Control>
+        <Control Id="DirectoryList" Type="DirectoryList" X="25" Y="83" Width="320" Height="98" Property="_BrowseProperty" Sunken="yes" Indirect="yes" TabSkip="no" />
+        <Control Id="PathLabel" Type="Text" X="25" Y="190" Width="320" Height="10" TabSkip="no" Text="폴더 경로:" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치할 폴더를 선택하세요." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}대상 폴더 선택" />
+      </Dialog>
+
+      <Dialog Id="VerifyReadyDlg" Width="370" Height="270" Title="PIPE1 설치" TrackDiskSpace="yes">
+        <Control Id="Install" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="설치" ShowCondition="NOT Installed AND ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="InstallNoShield" Type="PushButton" ElevationShield="no" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="설치" ShowCondition="NOT Installed AND NOT ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Repair" Type="PushButton" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="복구" ShowCondition="WixUI_InstallMode = &quot;Repair&quot;">
+          <Publish Event="ReinstallMode" Value="ecmus" />
+          <Publish Event="Reinstall" Value="All" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Remove" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="제거" ShowCondition="WixUI_InstallMode = &quot;Remove&quot; AND ALLUSERS">
+          <Publish Event="Remove" Value="All" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="RemoveNoShield" Type="PushButton" ElevationShield="no" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="제거" ShowCondition="WixUI_InstallMode = &quot;Remove&quot; AND NOT ALLUSERS">
+          <Publish Event="Remove" Value="All" />
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Update" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="업데이트" ShowCondition="WixUI_InstallMode = &quot;Update&quot; AND ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="UpdateNoShield" Type="PushButton" ElevationShield="no" X="212" Y="243" Width="80" Height="17" Default="yes" Hidden="yes" Text="업데이트" ShowCondition="WixUI_InstallMode = &quot;Update&quot; AND NOT ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="156" Y="243" Width="56" Height="17" Text="&lt; 뒤로" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="InstallTitle" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}설치 준비 완료" ShowCondition="NOT Installed" />
+        <Control Id="InstallDescription" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="PIPE1 설치를 시작할 준비가 되었습니다." ShowCondition="NOT Installed" />
+        <Control Id="InstallText" Type="Text" X="25" Y="72" Width="320" Height="80" Hidden="yes" NoPrefix="yes" Text="설치를 시작하려면 설치를 클릭하세요." ShowCondition="NOT Installed" />
+        <Control Id="RepairTitle" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}복구 준비 완료" ShowCondition="WixUI_InstallMode = &quot;Repair&quot;" />
+        <Control Id="RepairDescription" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="PIPE1 설치를 복구합니다." ShowCondition="WixUI_InstallMode = &quot;Repair&quot;" />
+        <Control Id="RepairText" Type="Text" X="25" Y="72" Width="320" Height="80" Hidden="yes" NoPrefix="yes" Text="복구를 시작하려면 복구를 클릭하세요." ShowCondition="WixUI_InstallMode = &quot;Repair&quot;" />
+        <Control Id="RemoveTitle" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}제거 준비 완료" ShowCondition="WixUI_InstallMode = &quot;Remove&quot;" />
+        <Control Id="RemoveDescription" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="PIPE1을 이 컴퓨터에서 제거합니다." ShowCondition="WixUI_InstallMode = &quot;Remove&quot;" />
+        <Control Id="RemoveText" Type="Text" X="25" Y="72" Width="320" Height="80" Hidden="yes" NoPrefix="yes" Text="제거를 시작하려면 제거를 클릭하세요." ShowCondition="WixUI_InstallMode = &quot;Remove&quot;" />
+        <Control Id="UpdateTitle" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}업데이트 준비 완료" ShowCondition="WixUI_InstallMode = &quot;Update&quot;" />
+        <Control Id="UpdateDescription" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="PIPE1 업데이트를 설치합니다." ShowCondition="WixUI_InstallMode = &quot;Update&quot;" />
+        <Control Id="UpdateText" Type="Text" X="25" Y="72" Width="320" Height="80" Hidden="yes" NoPrefix="yes" Text="업데이트를 시작하려면 업데이트를 클릭하세요." ShowCondition="WixUI_InstallMode = &quot;Update&quot;" />
+      </Dialog>
+
+      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="PIPE1 설치" Modeless="yes">
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Disabled="yes" Text="다음 &gt;" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="TitleInstalling" Type="Text" X="20" Y="15" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}PIPE1 설치 중" ShowCondition="NOT Installed OR (Installed AND (RESUME OR Preselected) AND NOT PATCH)" />
+        <Control Id="TextInstalling" Type="Text" X="20" Y="65" Width="330" Height="35" Hidden="yes" NoPrefix="yes" Text="PIPE1을 설치하는 중입니다. 잠시 기다려 주세요." ShowCondition="NOT Installed OR (Installed AND (RESUME OR Preselected) AND NOT PATCH)" />
+        <Control Id="TitleRepairing" Type="Text" X="20" Y="15" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}PIPE1 복구 중" ShowCondition="WixUI_InstallMode = &quot;Repair&quot;" />
+        <Control Id="TextRepairing" Type="Text" X="20" Y="65" Width="330" Height="35" Hidden="yes" NoPrefix="yes" Text="PIPE1 설치를 복구하는 중입니다." ShowCondition="WixUI_InstallMode = &quot;Repair&quot;" />
+        <Control Id="TitleRemoving" Type="Text" X="20" Y="15" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}PIPE1 제거 중" ShowCondition="WixUI_InstallMode = &quot;Remove&quot;" />
+        <Control Id="TextRemoving" Type="Text" X="20" Y="65" Width="330" Height="35" Hidden="yes" NoPrefix="yes" Text="PIPE1을 제거하는 중입니다." ShowCondition="WixUI_InstallMode = &quot;Remove&quot;" />
+        <Control Id="TitleUpdating" Type="Text" X="20" Y="15" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Hidden="yes" Text="{\WixUI_Font_Title}PIPE1 업데이트 중" ShowCondition="WixUI_InstallMode = &quot;Update&quot;" />
+        <Control Id="TextUpdating" Type="Text" X="20" Y="65" Width="330" Height="35" Hidden="yes" NoPrefix="yes" Text="PIPE1 업데이트를 설치하는 중입니다." ShowCondition="WixUI_InstallMode = &quot;Update&quot;" />
+        <Control Id="ActionText" Type="Text" X="70" Y="100" Width="285" Height="10">
+          <Subscribe Event="ActionText" Attribute="Text" />
+        </Control>
+        <Control Id="ProgressBar" Type="ProgressBar" X="20" Y="115" Width="330" Height="10" ProgressBlocks="yes">
+          <Subscribe Event="SetProgress" Attribute="Progress" />
+        </Control>
+        <Control Id="StatusLabel" Type="Text" X="20" Y="100" Width="50" Height="10" Text="상태:" />
+      </Dialog>
+
+      <Dialog Id="Pipe1MaintenanceTypeDlg" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Disabled="yes" Text="다음 &gt;" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 유지 관리" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="PIPE1을 복구하거나 제거할 수 있습니다." />
+        <Control Id="RepairButton" Type="PushButton" X="40" Y="95" Width="80" Height="17" Default="yes" Text="복구">
+          <Publish Property="WixUI_InstallMode" Value="Repair" Order="1" />
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+        </Control>
+        <Control Id="RepairText" Type="Text" X="60" Y="118" Width="280" Height="24" NoPrefix="yes" Text="기존 PIPE1 설치의 오류를 복구합니다." />
+        <Control Id="RemoveButton" Type="PushButton" X="40" Y="154" Width="80" Height="17" Text="제거">
+          <Publish Property="WixUI_InstallMode" Value="Remove" Order="1" />
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="2" />
+        </Control>
+        <Control Id="RemoveText" Type="Text" X="60" Y="177" Width="280" Height="24" NoPrefix="yes" Text="이 컴퓨터에서 PIPE1을 제거합니다." />
+      </Dialog>
+
+      <Dialog Id="ResumeDlg" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Back" Type="PushButton" X="156" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="Install" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Text="설치" Hidden="yes" ShowCondition="ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="InstallNoShield" Type="PushButton" ElevationShield="no" X="212" Y="243" Width="80" Height="17" Default="yes" Text="설치" Hidden="yes" ShowCondition="NOT ALLUSERS">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="취소">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="중단된 설치를 계속합니다." />
+        <Control Id="MessageTitle" Type="Text" X="20" Y="70" Width="330" Height="20" NoPrefix="yes" Text="{\WixUI_Font_Title}설치 계속 준비 완료" />
+        <Control Id="Message" Type="Text" X="20" Y="100" Width="330" Height="50" NoPrefix="yes" Text="설치를 클릭하면 중단된 PIPE1 설치를 계속합니다." />
+      </Dialog>
+
+      <Dialog Id="ExitDialog" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="마침">
+          <Publish Event="EndDialog" Value="Return" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Disabled="yes" Text="취소" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치가 완료되었습니다." />
+        <Control Id="MessageTitle" Type="Text" X="20" Y="80" Width="330" Height="20" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치 완료" />
+        <Control Id="Message" Type="Text" X="20" Y="112" Width="330" Height="45" NoPrefix="yes" Text="PIPE1이 이 컴퓨터에 설치되었습니다. 마침을 클릭해 설치를 종료하세요." />
+      </Dialog>
+
+      <Dialog Id="FatalError" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="마침">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Disabled="yes" Text="취소" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치에 실패했습니다." />
+        <Control Id="MessageTitle" Type="Text" X="20" Y="80" Width="330" Height="20" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치가 중단되었습니다." />
+        <Control Id="Message" Type="Text" X="20" Y="112" Width="330" Height="60" NoPrefix="yes" Text="설치를 완료하지 못했습니다. 마침을 클릭해 설치를 종료하세요." />
+      </Dialog>
+
+      <Dialog Id="UserExit" Width="370" Height="270" Title="PIPE1 설치">
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="마침">
+          <Publish Event="EndDialog" Value="Exit" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Disabled="yes" Text="취소" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="&lt; 뒤로" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="373" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="373" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="260" Height="15" Transparent="yes" NoPrefix="yes" Text="설치가 취소되었습니다." />
+        <Control Id="MessageTitle" Type="Text" X="20" Y="80" Width="330" Height="20" NoPrefix="yes" Text="{\WixUI_Font_Title}PIPE1 설치가 취소되었습니다." />
+        <Control Id="Message" Type="Text" X="20" Y="112" Width="330" Height="60" NoPrefix="yes" Text="PIPE1이 설치되지 않았습니다. 마침을 클릭해 설치를 종료하세요." />
+      </Dialog>
+
+      <Publish Dialog="BrowseDlg" Control="OK" Event="CheckTargetPath" Value="[_BrowseProperty]" Order="1" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SetTargetPath" Value="[_BrowseProperty]" Order="2" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="EndDialog" Value="Return" Order="3" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="Pipe1InstallDirDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="Pipe1MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="Pipe1MaintenanceTypeDlg" Order="3" Condition="WixUI_InstallMode = &quot;Repair&quot; OR WixUI_InstallMode = &quot;Remove&quot;" />
+
+      <InstallUISequence>
+        <Show Dialog="PrepareDlg" Before="AppSearch" />
+        <Show Dialog="Pipe1LicenseDlg" Before="ProgressDlg" Condition="NOT Installed" />
+        <Show Dialog="Pipe1MaintenanceTypeDlg" Before="ProgressDlg" Condition="Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH" />
+        <Show Dialog="ResumeDlg" Before="ProgressDlg" Condition="Installed AND (RESUME OR Preselected)" />
+        <Show Dialog="VerifyReadyDlg" Before="ProgressDlg" Condition="Installed AND PATCH" />
+        <Show Dialog="ProgressDlg" Before="ExecuteAction" />
+        <Show Dialog="ExitDialog" OnExit="success" />
+        <Show Dialog="FatalError" OnExit="error" />
+        <Show Dialog="UserExit" OnExit="cancel" />
+      </InstallUISequence>
+
+      <AdminUISequence>
+        <Show Dialog="ExitDialog" OnExit="success" />
+        <Show Dialog="FatalError" OnExit="error" />
+        <Show Dialog="UserExit" OnExit="cancel" />
+      </AdminUISequence>
+    </UI>
+  </Fragment>
+</Wix>

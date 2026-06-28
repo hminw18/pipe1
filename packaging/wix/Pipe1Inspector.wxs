@@ -1,31 +1,33 @@
 <Wix
-  xmlns="http://wixtoolset.org/schemas/v4/wxs"
-  xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package
     Name="$(var.AppName)"
     Manufacturer="$(var.Manufacturer)"
     Version="$(var.AppVersion)"
     UpgradeCode="7f0ac56d-9127-41d2-8d47-36e6502e2ba9"
+    Language="1042"
+    Codepage="949"
     Scope="perMachine"
     Compressed="yes">
 
     <SummaryInformation
-      Description="$(var.AppName) installer"
+      Description="$(var.AppName) 설치 프로그램"
       Manufacturer="$(var.Manufacturer)" />
 
     <MajorUpgrade
-      DowngradeErrorMessage="A newer version of $(var.AppName) is already installed." />
+      DowngradeErrorMessage="$(var.AppName)의 더 최신 버전이 이미 설치되어 있습니다." />
 
     <MediaTemplate
       EmbedCab="yes"
       CompressionLevel="high" />
 
-    <ui:WixUI
-      Id="WixUI_InstallDir"
-      InstallDirectory="INSTALLFOLDER" />
-    <WixVariable
-      Id="WixUILicenseRtf"
-      Value="$(var.WixLicenseRtf)" />
+    <Property
+      Id="WIXUI_INSTALLDIR"
+      Value="INSTALLFOLDER" />
+    <Property
+      Id="ARPNOMODIFY"
+      Value="1" />
+    <UIRef Id="Pipe1Ui" />
     <Icon
       Id="PIPE1.ico"
       SourceFile="$(var.WixIcon)" />
@@ -62,5 +64,6 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="$(var.AppName)" />
     </StandardDirectory>
+
   </Package>
 </Wix>
