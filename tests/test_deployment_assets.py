@@ -28,9 +28,14 @@ def test_lightsail_deployment_assets_exist_and_reference_expected_services() -> 
     caddy_text = caddyfile.read_text(encoding="utf-8")
     assert "{$PIPE1_LICENSE_DOMAIN}" in caddy_text
     assert "max_size 8MB" in caddy_text
+    assert "path /admin*" in caddy_text
+    assert "not remote_ip {$PIPE1_ADMIN_ALLOWED_IPS" in caddy_text
+    assert "respond @adminDenied 404" in caddy_text
     assert "reverse_proxy api:8000" in caddy_text
 
     env_text = env_example.read_text(encoding="utf-8")
     assert "PIPE1_LICENSE_SIGNING_PRIVATE_KEY=" in env_text
     assert "DATABASE_URL=" in env_text
     assert "PIPE1_LICENSE_DOMAIN=" in env_text
+    assert "PIPE1_ADMIN_ALLOWED_IPS=" in env_text
+    assert "PIPE1_ADMIN_LOGIN_RATE_LIMIT_ATTEMPTS=" in env_text
