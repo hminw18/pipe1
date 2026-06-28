@@ -90,3 +90,15 @@ def test_wix_installer_does_not_register_system_fonts() -> None:
     tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Inspector.wxs")
 
     assert tree.find(".//wix:StandardDirectory[@Id='FontsFolder']", WIX_NS) is None
+
+
+def test_wix_installer_replaces_same_version_test_installs() -> None:
+    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Inspector.wxs")
+
+    major_upgrade = tree.find(".//wix:MajorUpgrade", WIX_NS)
+    install_location = tree.find(".//wix:SetProperty[@Id='ARPINSTALLLOCATION']", WIX_NS)
+
+    assert major_upgrade is not None
+    assert major_upgrade.attrib["AllowSameVersionUpgrades"] == "yes"
+    assert install_location is not None
+    assert install_location.attrib["Value"] == "[INSTALLFOLDER]"

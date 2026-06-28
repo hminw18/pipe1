@@ -15,6 +15,7 @@
       Manufacturer="$(var.Manufacturer)" />
 
     <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
       DowngradeErrorMessage="$(var.AppName)의 더 최신 버전이 이미 설치되어 있습니다." />
 
     <MediaTemplate
@@ -27,6 +28,11 @@
     <Property
       Id="ARPNOMODIFY"
       Value="1" />
+    <SetProperty
+      Id="ARPINSTALLLOCATION"
+      Value="[INSTALLFOLDER]"
+      After="CostFinalize"
+      Sequence="both" />
     <UIRef Id="Pipe1Ui" />
     <Icon
       Id="PIPE1.ico"
