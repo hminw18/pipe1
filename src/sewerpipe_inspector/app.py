@@ -115,6 +115,8 @@ def _ensure_license_activation() -> (
     status = service.current_status()
     if status.status == "active":
         return service, status, config
+    if not config.require_activation:
+        return service, None, config
 
     dialog = LicenseActivationDialog(service)
     if dialog.exec() != QDialog.DialogCode.Accepted or dialog.license_status is None:
