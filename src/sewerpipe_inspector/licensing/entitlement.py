@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from pipe1_license_server.signing import (
+from sewerpipe_inspector.licensing.signing import (
     SignatureVerificationError,
     verify_entitlement_envelope,
 )

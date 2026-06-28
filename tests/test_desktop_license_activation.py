@@ -1,15 +1,44 @@
 from __future__ import annotations
 
+import base64
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from pipe1_license_server.signing import EntitlementSigner, generate_private_key_b64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
 from sewerpipe_inspector.licensing.api_client import LicenseApiClientProtocol
 from sewerpipe_inspector.licensing.device_identity import DeviceIdentity
 from sewerpipe_inspector.licensing.dpapi import DpapiProtector
 from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
 from sewerpipe_inspector.licensing.license_service import LicenseService
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
+from sewerpipe_inspector.licensing.signing import canonical_json_bytes
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+class _EntitlementSigner:
+    def __init__(self, key_id: str) -> None:
+        self.key_id = key_id
+        self._private_key = Ed25519PrivateKey.generate()
+
+    @property
+    def public_key_b64(self) -> str:
+        public_key = self._private_key.public_key()
+        raw = public_key.public_bytes(encoding=Encoding.Raw, format=PublicFormat.Raw)
+        return _b64url_encode(raw)
+
+    def sign(self, payload: dict) -> dict:
+        signature = self._private_key.sign(canonical_json_bytes(payload))
+        return {
+            "payload": payload,
+            "signature": _b64url_encode(signature),
+            "alg": "EdDSA",
+            "kid": self.key_id,
+        }
 
 
 class FakeProtector:
@@ -21,7 +50,7 @@ class FakeProtector:
 
 
 class FakeLicenseClient(LicenseApiClientProtocol):
-    def __init__(self, signer: EntitlementSigner) -> None:
+    def __init__(self, signer: _EntitlementSigner) -> None:
         self.signer = signer
         self.seen_activation_keys: list[str] = []
         self.validation_calls = 0
@@ -83,8 +112,7 @@ class FakeLicenseClient(LicenseApiClientProtocol):
 def test_desktop_activation_stores_signed_entitlement_without_raw_key(
     tmp_path: Path,
 ) -> None:
-    private_key = generate_private_key_b64()
-    signer = EntitlementSigner(private_key, "test-key")
+    signer = _EntitlementSigner("test-key")
     verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
     client = FakeLicenseClient(signer)
     store = LocalLicenseStore(
@@ -118,8 +146,7 @@ def test_desktop_activation_stores_signed_entitlement_without_raw_key(
 
 
 def test_desktop_rejects_entitlement_for_other_device(tmp_path: Path) -> None:
-    private_key = generate_private_key_b64()
-    signer = EntitlementSigner(private_key, "test-key")
+    signer = _EntitlementSigner("test-key")
     verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
     other_device_entitlement = signer.sign(
         {
@@ -212,4 +239,3 @@ def test_device_identity_forced_value_is_stored_protected(tmp_path: Path) -> Non
     assert device_identity.get_or_create("pipe1-forced-id") == "pipe1-forced-id"
     assert device_identity.get_or_create() == "pipe1-forced-id"
     assert "pipe1-forced-id" not in device_file.read_text(encoding="utf-8")
-
