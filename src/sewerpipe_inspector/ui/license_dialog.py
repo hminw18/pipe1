@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from sewerpipe_inspector.licensing.errors import LicenseApiError
+from sewerpipe_inspector.licensing.errors import LicenseApiError, LicenseConnectionError
 from sewerpipe_inspector.licensing.license_service import (
     LicenseService,
     LicenseStatus,
@@ -44,6 +44,8 @@ class _ActivationWorker(QObject):
     def run(self) -> None:
         try:
             self.succeeded.emit(self.service.activate(self.license_key))
+        except LicenseConnectionError as exc:
+            self.failed.emit(str(exc))
         except LicenseApiError as exc:
             self.failed.emit(ERROR_MESSAGES.get(exc.code, exc.message))
         except Exception:

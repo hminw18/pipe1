@@ -204,22 +204,22 @@ try {
 
     if (-not $SkipAppBuild) {
         $BuildWindowsScript = Join-Path $PSScriptRoot "build_windows.ps1"
-        $BuildArgs = @(
-            "-ClientEnvFile", $ClientEnvFile,
-            "-DistPath", $DistPath,
-            "-WorkPath", $WorkPath
-        )
+        $BuildArgs = @{
+            ClientEnvFile = $ClientEnvFile
+            DistPath = $DistPath
+            WorkPath = $WorkPath
+        }
         if ($PythonExe) {
-            $BuildArgs += @("-PythonExe", $PythonExe)
+            $BuildArgs["PythonExe"] = $PythonExe
         }
         if ($SkipTests) {
-            $BuildArgs += "-SkipTests"
+            $BuildArgs["SkipTests"] = $true
         }
         if ($UseExampleConfig) {
-            $BuildArgs += "-UseExampleConfig"
+            $BuildArgs["UseExampleConfig"] = $true
         }
         if ($NoClean) {
-            $BuildArgs += "-NoClean"
+            $BuildArgs["NoClean"] = $true
         }
 
         & $BuildWindowsScript @BuildArgs

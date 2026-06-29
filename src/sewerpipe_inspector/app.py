@@ -4,7 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QStandardPaths
+from PySide6.QtCore import QObject, QStandardPaths, QThread, Signal, Slot
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QFileDialog, QMessageBox
 
@@ -30,6 +30,59 @@ from sewerpipe_inspector.ui.license_dialog import LicenseActivationDialog
 from sewerpipe_inspector.ui.main_window import MainWindow
 
 DEFAULT_WORKSPACE_DIRNAME = "pipe1"
+_ONLINE_REVALIDATION_REASONS = {
+    "license entitlement is expired",
+    "offline grace period has expired",
+}
+
+
+class _LicenseValidationWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, service: LicenseService) -> None:
+        super().__init__()
+        self.service = service
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self.service.current_status(validate_online=True))
+        except Exception as exc:
+            self.failed.emit(str(exc) or "라이선스 검증 중 오류가 발생했습니다.")
+        finally:
+            self.finished.emit()
+
+
+class _LicenseValidationHandler(QObject):
+    def __init__(
+        self,
+        service: LicenseService,
+        window: MainWindow,
+        *,
+        require_activation: bool,
+    ) -> None:
+        super().__init__(window)
+        self.service = service
+        self.window = window
+        self.require_activation = require_activation
+
+    @Slot(object)
+    def on_succeeded(self, status: LicenseStatus) -> None:
+        _handle_background_license_status(
+            self.service,
+            self.window,
+            status,
+            require_activation=self.require_activation,
+        )
+
+    @Slot(str)
+    def on_failed(self, message: str) -> None:
+        _show_background_license_message(
+            self.window,
+            f"라이선스 온라인 검증 실패 - 오프라인 유예 사용 중: {message}",
+        )
 
 
 def _default_workspace_root() -> Path:
@@ -112,9 +165,13 @@ def _ensure_license_activation() -> (
         QMessageBox.critical(None, "라이선스 설정 오류", str(exc))
         return None
 
-    status = service.current_status(validate_online=True)
+    status = service.current_status()
     if status.status == "active":
         return service, status, config
+    if _requires_online_revalidation(status):
+        status = service.current_status(validate_online=True)
+        if status.status == "active":
+            return service, status, config
     if not config.require_activation:
         return service, None, config
 
@@ -122,6 +179,116 @@ def _ensure_license_activation() -> (
     if dialog.exec() != QDialog.DialogCode.Accepted or dialog.license_status is None:
         return None
     return service, dialog.license_status, config
+
+
+def _requires_online_revalidation(status: LicenseStatus) -> bool:
+    return status.status == "invalid" and status.reason in _ONLINE_REVALIDATION_REASONS
+
+
+def _start_background_license_validation(
+    service: LicenseService,
+    window: MainWindow,
+    *,
+    require_activation: bool,
+) -> None:
+    thread = QThread(window)
+    worker = _LicenseValidationWorker(service)
+    handler = _LicenseValidationHandler(
+        service,
+        window,
+        require_activation=require_activation,
+    )
+    worker.moveToThread(thread)
+    active_threads = getattr(window, "_license_validation_threads", [])
+    active_threads.append((thread, worker, handler))
+    setattr(window, "_license_validation_threads", active_threads)
+
+    def cleanup() -> None:
+        active = getattr(window, "_license_validation_threads", [])
+        try:
+            active.remove((thread, worker, handler))
+        except ValueError:
+            pass
+        setattr(window, "_license_validation_threads", active)
+
+    thread.started.connect(worker.run)
+    worker.succeeded.connect(handler.on_succeeded)
+    worker.failed.connect(handler.on_failed)
+    worker.finished.connect(thread.quit)
+    worker.finished.connect(worker.deleteLater)
+    thread.finished.connect(cleanup)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
+
+
+def _handle_background_license_status(
+    service: LicenseService,
+    window: MainWindow,
+    status: LicenseStatus,
+    *,
+    require_activation: bool,
+) -> None:
+    window.license_status = status
+    if status.status == "active":
+        if status.reason:
+            _show_background_license_message(
+                window,
+                f"라이선스 온라인 검증 실패 - 오프라인 유예 사용 중: {status.reason}",
+            )
+        elif status.masked_license_key:
+            window.statusBar().showMessage(
+                f"라이선스 온라인 검증 완료: {status.masked_license_key}", 5000
+            )
+        upload_service = getattr(window.inspection, "training_upload_service", None)
+        if upload_service is not None and status.device_upload_token:
+            upload_service.client.upload_token = status.device_upload_token
+        return
+
+    message = f"라이선스 검증 실패: {status.reason or status.status}"
+    _show_background_license_message(window, message)
+    if require_activation:
+        _prompt_for_license_reactivation(service, window, message)
+
+
+def _prompt_for_license_reactivation(
+    service: LicenseService,
+    window: MainWindow,
+    message: str,
+) -> None:
+    dialog = LicenseActivationDialog(service)
+    if hasattr(dialog, "status_label"):
+        dialog.status_label.setText(f"{message}\n새 라이선스 키를 입력하세요.")
+    if dialog.exec() != QDialog.DialogCode.Accepted or dialog.license_status is None:
+        _show_background_license_message(
+            window,
+            "라이선스가 갱신되지 않았습니다. 새 라이선스 키가 필요합니다.",
+        )
+        _exit_after_license_failure(window)
+        return
+
+    window.license_status = dialog.license_status
+    # A replacement key can belong to a different license. Drop the old upload
+    # service so queued server uploads cannot continue under stale license IDs.
+    if hasattr(window.inspection, "training_upload_service"):
+        window.inspection.training_upload_service = None
+    if dialog.license_status.masked_license_key:
+        window.statusBar().showMessage(
+            f"라이선스 갱신 완료: {dialog.license_status.masked_license_key}",
+            5000,
+        )
+
+
+def _exit_after_license_failure(window: MainWindow) -> None:
+    window.setEnabled(False)
+    window.close()
+    app = QApplication.instance()
+    if app is not None:
+        app.quit()
+
+
+def _show_background_license_message(window: MainWindow, message: str) -> None:
+    logging.getLogger(__name__).warning(message)
+    window.statusBar().showMessage(message, 15000)
 
 
 def _build_training_upload_service(
@@ -193,7 +360,7 @@ def run() -> None:
     license_context = _ensure_license_activation()
     if license_context is None:
         return
-    _, license_status, license_config = license_context
+    license_service, license_status, license_config = license_context
     settings = load_settings()
 
     workspace: Path | None = None
@@ -274,6 +441,7 @@ def run() -> None:
         window = MainWindow(
             db,
             inspection,
+            license_service=license_service,
             license_status=license_status,
             license_config=license_config,
         )
@@ -282,6 +450,12 @@ def run() -> None:
                 f"라이선스 활성화됨: {license_status.masked_license_key}"
             )
         window.show()
+        if license_service is not None and license_status is not None:
+            _start_background_license_validation(
+                license_service,
+                window,
+                require_activation=license_config.require_activation,
+            )
         app.exec()
     except Exception:
         logging.exception("Fatal startup failure")

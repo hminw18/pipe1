@@ -59,17 +59,18 @@ class LicenseService:
             os_version=self.device_identity.os_version(),
             app_version=self.app_version,
         )
-        entitlement = response["entitlement"]
+        activation_id = _required_string(response, "activation_id")
+        entitlement = _required_dict(response, "entitlement")
         payload = self.verifier.verify(entitlement, expected_device_id=device_id)
         self.store.save_activation_state(
-            activation_id=response["activation_id"],
+            activation_id=activation_id,
             masked_license_key=mask_license_key(license_key),
             entitlement=entitlement,
             device_upload_token=response.get("device_upload_token"),
         )
         return self._status_from_payload(
             "active",
-            response["activation_id"],
+            activation_id,
             mask_license_key(license_key),
             payload,
             response.get("device_upload_token"),
@@ -108,6 +109,7 @@ class LicenseService:
                 transient_validation_error = str(exc)
             except LicenseApiError as exc:
                 if not _is_transient_validation_error(exc):
+                    self.store.clear()
                     return LicenseStatus(status="invalid", reason=exc.message)
                 transient_validation_error = exc.message
             else:
@@ -122,6 +124,8 @@ class LicenseService:
                             refreshed, expected_device_id=device_id
                         )
                     except ValueError as exc:
+                        if _is_explicit_entitlement_rejection(str(exc)):
+                            self.store.clear()
                         return LicenseStatus(status="invalid", reason=str(exc))
                     upload_token = response.get(
                         "device_upload_token", state.get("device_upload_token")
@@ -154,6 +158,9 @@ class LicenseService:
             reason=transient_validation_error,
         )
 
+    def clear_activation(self) -> None:
+        self.store.clear()
+
     @staticmethod
     def _status_from_payload(
         status: str,
@@ -182,3 +189,24 @@ class LicenseService:
 
 def _is_transient_validation_error(exc: LicenseApiError) -> bool:
     return exc.status_code in {408, 429} or exc.status_code >= 500
+
+
+def _is_explicit_entitlement_rejection(reason: str) -> bool:
+    return reason in {
+        "license entitlement is expired",
+        "license is not active",
+    }
+
+
+def _required_dict(response: dict[str, Any], key: str) -> dict[str, Any]:
+    value = response.get(key)
+    if not isinstance(value, dict):
+        raise LicenseConnectionError("라이선스 서버 응답 형식이 올바르지 않습니다.")
+    return value
+
+
+def _required_string(response: dict[str, Any], key: str) -> str:
+    value = response.get(key)
+    if not isinstance(value, str) or not value:
+        raise LicenseConnectionError("라이선스 서버 응답 형식이 올바르지 않습니다.")
+    return value

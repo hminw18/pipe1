@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -42,6 +42,7 @@ class SettingsDialog(QDialog):
         license_status: LicenseStatus | None,
         license_config: LicenseRuntimeConfig | None,
         training_upload_service: TrainingUploadService | None,
+        reset_license_callback: Callable[[], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -50,8 +51,10 @@ class SettingsDialog(QDialog):
         self.license_status = license_status
         self.license_config = license_config
         self.training_upload_service = training_upload_service
+        self.reset_license_callback = reset_license_callback
         self.settings = load_settings()
         self.training_upload_consent_changed = False
+        self.license_reset_requested = False
 
         self.setWindowTitle("설정")
         self.resize(680, 520)
@@ -212,6 +215,12 @@ class SettingsDialog(QDialog):
                 label,
                 QLabel("사용 가능" if enabled else "사용 불가", tab),
             )
+        reset_button = QPushButton("라이선스 초기화", tab)
+        reset_button.setEnabled(
+            self.license_status is not None and self.reset_license_callback is not None
+        )
+        reset_button.clicked.connect(self._reset_license)
+        row = _add_settings_row(grid, row, "재활성화", reset_button)
         layout.addLayout(grid)
         layout.addStretch(1)
         return tab
@@ -353,6 +362,35 @@ class SettingsDialog(QDialog):
             self.training_upload_service.consent_version = TRAINING_CONSENT_VERSION
         self.training_upload_consent_changed = True
 
+    def _reset_license(self) -> None:
+        if self.reset_license_callback is None:
+            return
+        result = QMessageBox.question(
+            self,
+            "라이선스 초기화",
+            (
+                "현재 PC의 로컬 라이선스 정보를 삭제하고 앱을 종료합니다.\n\n"
+                "다음 실행 시 새 라이선스 키를 다시 입력해야 합니다. 계속할까요?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.reset_license_callback()
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "라이선스 초기화",
+                f"라이선스 정보를 삭제할 수 없습니다.\n\n{exc}",
+            )
+            return
+        self.license_status = None
+        self.training_upload_service = None
+        self.license_reset_requested = True
+        super().accept()
+
     def _license_status_text(self) -> str:
         if self.license_status is None:
             if (
@@ -367,6 +405,8 @@ class SettingsDialog(QDialog):
                 return "라이선스 서버 미설정"
             return "비활성"
         if self.license_status.status == "active":
+            if self.license_status.reason:
+                return f"활성 (오프라인 유예: {self.license_status.reason})"
             return "활성"
         if self.license_status.reason:
             return f"{self.license_status.status} ({self.license_status.reason})"

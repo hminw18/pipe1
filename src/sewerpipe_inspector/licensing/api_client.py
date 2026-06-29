@@ -63,7 +63,7 @@ class HttpLicenseApiClient:
         except httpx.RequestError as exc:
             raise LicenseConnectionError("라이선스 서버에 연결할 수 없습니다.") from exc
         _raise_for_status(response)
-        return response.json()
+        return _json_dict(response)
 
     def validate(
         self,
@@ -85,7 +85,7 @@ class HttpLicenseApiClient:
         except httpx.RequestError as exc:
             raise LicenseConnectionError("라이선스 서버에 연결할 수 없습니다.") from exc
         _raise_for_status(response)
-        return response.json()
+        return _json_dict(response)
 
 
 def _raise_for_status(response: httpx.Response) -> None:
@@ -102,6 +102,18 @@ def _raise_for_status(response: httpx.Response) -> None:
         str(message or "서버 오류가 발생했습니다."),
         response.status_code,
     )
+
+
+def _json_dict(response: httpx.Response) -> dict:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise LicenseConnectionError(
+            "라이선스 서버 응답을 해석할 수 없습니다."
+        ) from exc
+    if not isinstance(payload, dict):
+        raise LicenseConnectionError("라이선스 서버 응답 형식이 올바르지 않습니다.")
+    return payload
 
 
 def _validate_secure_base_url(base_url: str) -> None:

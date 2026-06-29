@@ -6,6 +6,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+import pytest
 
 from sewerpipe_inspector.licensing.api_client import LicenseApiClientProtocol
 from sewerpipe_inspector.licensing.device_identity import DeviceIdentity
@@ -47,13 +48,14 @@ def _active_payload(
     *,
     now: datetime | None = None,
     offline_grace_delta: timedelta = timedelta(days=14),
+    license_status: str = "active",
 ) -> dict:
     issued_at = now or datetime.now(UTC)
     return {
         "license_id": "lic_test",
         "license_key_id": "key_test",
         "organization_id": "org_test",
-        "license_status": "active",
+        "license_status": license_status,
         "plan": "standard",
         "features": {
             "local_report": True,
@@ -128,6 +130,22 @@ class FakeLicenseClient(LicenseApiClientProtocol):
             "status": "valid",
             "device_upload_token": "put_refreshed",
             "entitlement": entitlement,
+        }
+
+
+class MalformedActivationClient(FakeLicenseClient):
+    def activate(
+        self,
+        *,
+        license_key: str,
+        device_id: str,
+        device_name: str | None,
+        os_name: str,
+        os_version: str,
+        app_version: str,
+    ) -> dict:
+        return {
+            "entitlement": self.signer.sign(_active_payload(device_id)),
         }
 
 
@@ -227,6 +245,59 @@ def test_desktop_rejects_deactivated_license_on_online_validation(
     assert status.status == "invalid"
     assert status.reason == "Activation is inactive."
     assert client.validation_calls == 1
+    assert store.load() is None
+
+
+def test_desktop_clears_cached_license_when_server_returns_inactive_entitlement(
+    tmp_path: Path,
+) -> None:
+    signer = _EntitlementSigner("test-key")
+    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
+    client = FakeLicenseClient(signer)
+    store = LocalLicenseStore(
+        tmp_path / "license_state.json", protector=FakeProtector()
+    )
+    device_identity = DeviceIdentity(
+        tmp_path / "device_id", protector=FakeProtector()
+    )
+    device_id = device_identity.get_or_create("pipe1-dev-current")
+    service = LicenseService(
+        store=store,
+        device_identity=device_identity,
+        client=client,
+        verifier=verifier,
+        app_version="0.1.0",
+    )
+    service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
+    client.validation_entitlement = signer.sign(
+        _active_payload(device_id, license_status="inactive")
+    )
+
+    status = service.current_status(validate_online=True)
+
+    assert status.status == "invalid"
+    assert status.reason == "license is not active"
+    assert client.validation_calls == 1
+    assert store.load() is None
+
+
+def test_desktop_rejects_malformed_activation_response(tmp_path: Path) -> None:
+    signer = _EntitlementSigner("test-key")
+    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
+    service = LicenseService(
+        store=LocalLicenseStore(
+            tmp_path / "license_state.json", protector=FakeProtector()
+        ),
+        device_identity=DeviceIdentity(
+            tmp_path / "device_id", protector=FakeProtector()
+        ),
+        client=MalformedActivationClient(signer),
+        verifier=verifier,
+        app_version="0.1.0",
+    )
+
+    with pytest.raises(LicenseConnectionError):
+        service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
 
 
 def test_desktop_allows_cached_license_when_online_validation_is_unavailable(

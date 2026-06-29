@@ -109,7 +109,7 @@ from sewerpipe_inspector.ui.widgets import TimelineSlider
 
 if TYPE_CHECKING:
     from sewerpipe_inspector.licensing.config import LicenseRuntimeConfig
-    from sewerpipe_inspector.licensing.license_service import LicenseStatus
+    from sewerpipe_inspector.licensing.license_service import LicenseService, LicenseStatus
 
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
@@ -1651,6 +1651,7 @@ class MainWindow(QMainWindow):
         db: Database,
         inspection: InspectionService,
         *,
+        license_service: LicenseService | None = None,
         license_status: LicenseStatus | None = None,
         license_config: LicenseRuntimeConfig | None = None,
         parent=None,
@@ -1658,6 +1659,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.db = db
         self.inspection = inspection
+        self.license_service = license_service
         self.license_status = license_status
         self.license_config = license_config
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -4223,14 +4225,36 @@ class MainWindow(QMainWindow):
             license_status=self.license_status,
             license_config=self.license_config,
             training_upload_service=self.inspection.training_upload_service,
+            reset_license_callback=(
+                self._reset_license_state if self.license_service is not None else None
+            ),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.license_reset_requested:
+            self.license_status = None
+            self.inspection.training_upload_service = None
+            QMessageBox.information(
+                self,
+                "라이선스 초기화",
+                "로컬 라이선스 정보가 삭제되었습니다. 앱을 종료합니다.",
+            )
+            self.setEnabled(False)
+            self.close()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
             return
         message = "설정이 저장되었습니다."
         if dialog.training_upload_consent_changed:
             message = "설정이 저장되었습니다. 학습 데이터 업로드 동의가 변경되었습니다."
         self.statusBar().showMessage(message, 5000)
+
+    def _reset_license_state(self) -> None:
+        if self.license_service is None:
+            return
+        self.license_service.clear_activation()
 
     def change_workspace_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
