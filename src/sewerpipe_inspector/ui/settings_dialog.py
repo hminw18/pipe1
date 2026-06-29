@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from sewerpipe_inspector.licensing.config import LicenseRuntimeConfig
     from sewerpipe_inspector.licensing.license_service import LicenseStatus
     from sewerpipe_inspector.services.training_upload_service import TrainingUploadService
+    from sewerpipe_inspector.updates.models import UpdateInfo
+    from sewerpipe_inspector.updates.update_service import UpdateService
 
 
 TRAINING_CONSENT_TYPE = "capture_images_and_labels"
@@ -42,6 +45,8 @@ class SettingsDialog(QDialog):
         license_status: LicenseStatus | None,
         license_config: LicenseRuntimeConfig | None,
         training_upload_service: TrainingUploadService | None,
+        update_service: UpdateService | None = None,
+        update_info: UpdateInfo | None = None,
         reset_license_callback: Callable[[], None] | None = None,
         parent=None,
     ) -> None:
@@ -51,6 +56,8 @@ class SettingsDialog(QDialog):
         self.license_status = license_status
         self.license_config = license_config
         self.training_upload_service = training_upload_service
+        self.update_service = update_service
+        self.update_info = update_info
         self.reset_license_callback = reset_license_callback
         self.settings = load_settings()
         self.training_upload_consent_changed = False
@@ -104,6 +111,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_general_tab(), "일반")
         tabs.addTab(self._build_license_tab(), "라이선스")
         tabs.addTab(self._build_training_upload_tab(), "학습 데이터")
+        tabs.addTab(self._build_update_tab(), "업데이트")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -159,6 +167,51 @@ class SettingsDialog(QDialog):
         )
         note.setWordWrap(True)
         layout.addWidget(note)
+        layout.addStretch(1)
+        return tab
+
+    def _build_update_tab(self) -> QWidget:
+        tab = QWidget(self)
+        tab.setObjectName("reportExportPanel")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        grid = _settings_grid()
+        row = 0
+        row = _add_settings_row(
+            grid,
+            row,
+            "현재 버전",
+            QLabel(_display_text(self.license_config.app_version if self.license_config else None), tab),
+        )
+        row = _add_settings_row(
+            grid,
+            row,
+            "채널",
+            QLabel(_display_text(self.license_config.update_channel if self.license_config else None), tab),
+        )
+        self.update_status_label = QLabel(self._update_status_text(), tab)
+        self.update_status_label.setWordWrap(True)
+        row = _add_settings_row(grid, row, "상태", self.update_status_label)
+        self.update_notes_label = QLabel(self._update_release_notes_text(), tab)
+        self.update_notes_label.setWordWrap(True)
+        row = _add_settings_row(grid, row, "릴리스 노트", self.update_notes_label)
+        button_row = QWidget(tab)
+        button_layout = QHBoxLayout(button_row)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(6)
+        self.update_check_button = QPushButton("업데이트 확인", button_row)
+        self.update_check_button.setEnabled(self.update_service is not None)
+        self.update_check_button.clicked.connect(self._check_for_update)
+        self.update_install_button = QPushButton("다운로드 및 설치", button_row)
+        self.update_install_button.setEnabled(self._can_install_update())
+        self.update_install_button.clicked.connect(self._download_and_install_update)
+        button_layout.addWidget(self.update_check_button)
+        button_layout.addWidget(self.update_install_button)
+        button_layout.addStretch(1)
+        row = _add_settings_row(grid, row, "작업", button_row)
+        layout.addLayout(grid)
         layout.addStretch(1)
         return tab
 
@@ -347,7 +400,7 @@ class SettingsDialog(QDialog):
         app_version = (
             self.license_config.app_version
             if self.license_config is not None
-            else "0.1.0"
+            else "0.1.1"
         )
         self.db.set_training_upload_consent(
             license_id=license_id,
@@ -390,6 +443,92 @@ class SettingsDialog(QDialog):
         self.training_upload_service = None
         self.license_reset_requested = True
         super().accept()
+
+    def _check_for_update(self) -> None:
+        if self.update_service is None:
+            return
+        self._set_update_buttons_enabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.update_info = self.update_service.check_for_update()
+        except Exception as exc:
+            QMessageBox.warning(self, "업데이트", f"업데이트 확인에 실패했습니다.\n\n{exc}")
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._refresh_update_ui()
+            self._set_update_buttons_enabled(True)
+
+    def _download_and_install_update(self) -> None:
+        if self.update_service is None or self.update_info is None:
+            return
+        if not self.update_info.update_available:
+            return
+        result = QMessageBox.question(
+            self,
+            "업데이트 설치",
+            (
+                "업데이트 MSI를 다운로드하고 검증한 뒤 설치를 시작합니다.\n\n"
+                "설치가 시작되면 PIPE1이 종료됩니다. 계속할까요?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        self._set_update_buttons_enabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            msi_path = self.update_service.download_update(self.update_info)
+            self.update_service.launch_installer(msi_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "업데이트", f"업데이트 설치를 시작할 수 없습니다.\n\n{exc}")
+            QApplication.restoreOverrideCursor()
+            self._set_update_buttons_enabled(True)
+            return
+        QApplication.restoreOverrideCursor()
+        super().accept()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _refresh_update_ui(self) -> None:
+        self.update_status_label.setText(self._update_status_text())
+        self.update_notes_label.setText(self._update_release_notes_text())
+        self.update_install_button.setEnabled(self._can_install_update())
+
+    def _set_update_buttons_enabled(self, enabled: bool) -> None:
+        if self.update_service is None:
+            enabled = False
+        self.update_check_button.setEnabled(enabled)
+        self.update_install_button.setEnabled(enabled and self._can_install_update())
+
+    def _can_install_update(self) -> bool:
+        return bool(
+            self.update_service is not None
+            and self.update_info is not None
+            and self.update_info.update_available
+        )
+
+    def _update_status_text(self) -> str:
+        if self.license_config is None:
+            return "업데이트 설정 없음"
+        if not self.license_config.update_check_enabled:
+            return "업데이트 확인 비활성화"
+        if self.update_service is None:
+            return "업데이트 서버 미설정"
+        if self.update_info is None:
+            return "아직 확인하지 않음"
+        if not self.update_info.update_available:
+            return f"최신 버전입니다. ({self.update_info.latest_version or self.update_info.current_version})"
+        label = f"새 버전 사용 가능: {self.update_info.latest_version or '-'}"
+        if self.update_info.mandatory:
+            label += " (필수)"
+        return label
+
+    def _update_release_notes_text(self) -> str:
+        if self.update_info is None or not self.update_info.release_notes:
+            return "-"
+        return self.update_info.release_notes
 
     def _license_status_text(self) -> str:
         if self.license_status is None:

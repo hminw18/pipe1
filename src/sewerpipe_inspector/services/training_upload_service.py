@@ -103,7 +103,7 @@ class TrainingUploadService:
         upload_token: str | None = None,
         consent_type: str = "capture_images_and_labels",
         consent_version: str = "2026-06-25",
-        app_version: str = "0.1.0",
+        app_version: str = "0.1.1",
     ) -> None:
         self.db = db
         self.client = client

@@ -13,6 +13,8 @@ from sewerpipe_inspector.licensing.errors import LicenseConfigurationError
 from sewerpipe_inspector.licensing.license_service import LicenseService
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
 from sewerpipe_inspector.resources import resource_path_candidates
+from sewerpipe_inspector.updates.api_client import HttpUpdateApiClient
+from sewerpipe_inspector.updates.update_service import UpdateService
 
 
 CLIENT_ENV_FILE_ENV = "PIPE1_CLIENT_ENV_FILE"
@@ -28,6 +30,10 @@ class LicenseRuntimeConfig:
     app_version: str
     state_dir: Path
     require_activation: bool
+    update_check_enabled: bool = False
+    update_channel: str = "stable"
+    update_platform: str = "windows"
+    update_arch: str = "x64"
 
     @property
     def is_configured(self) -> bool:
@@ -110,14 +116,25 @@ def load_license_runtime_config(
         values.get("PIPE1_REQUIRE_LICENSE_ACTIVATION", "").lower()
         in {"1", "true", "yes"}
     )
+    default_update_enabled = app_env in {"prod", "production"}
+    update_check_enabled = _parse_bool(
+        values.get("PIPE1_UPDATE_CHECK_ENABLED"),
+        default=default_update_enabled,
+    )
     return LicenseRuntimeConfig(
         api_base_url=values.get("PIPE1_LICENSE_API_BASE_URL"),
         public_keys=public_keys,
         app_env=app_env,
-        app_version=values.get("PIPE1_APP_VERSION", "0.1.0"),
+        app_version=values.get("PIPE1_APP_VERSION", "0.1.1"),
         state_dir=Path(state_dir_raw) if state_dir_raw else default_license_state_dir(),
         require_activation=app_env in {"prod", "production"}
         or explicit_require_activation,
+        update_check_enabled=update_check_enabled,
+        update_channel=values.get("PIPE1_UPDATE_CHANNEL", "stable").strip()
+        or "stable",
+        update_platform=values.get("PIPE1_UPDATE_PLATFORM", "windows").strip()
+        or "windows",
+        update_arch=values.get("PIPE1_UPDATE_ARCH", "x64").strip() or "x64",
     )
 
 
@@ -131,3 +148,24 @@ def build_license_service(config: LicenseRuntimeConfig) -> LicenseService:
         verifier=EntitlementVerifier(config.public_keys),
         app_version=config.app_version,
     )
+
+
+def build_update_service(config: LicenseRuntimeConfig) -> UpdateService | None:
+    if not config.update_check_enabled or not config.api_base_url:
+        return None
+    client = HttpUpdateApiClient(config.api_base_url)
+    return UpdateService(
+        client=client,
+        current_version=config.app_version,
+        platform=config.update_platform,
+        arch=config.update_arch,
+        channel=config.update_channel,
+        download_dir=UpdateService.default_download_dir(),
+        allowed_download_host=client.allowed_download_host,
+    )
+
+
+def _parse_bool(value: str | None, *, default: bool) -> bool:
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}

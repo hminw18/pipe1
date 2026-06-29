@@ -12,6 +12,7 @@ from sewerpipe_inspector.db import Database
 from sewerpipe_inspector.fonts import APP_FONT_FAMILY, find_app_font_paths
 from sewerpipe_inspector.licensing.config import (
     LicenseRuntimeConfig,
+    build_update_service,
     build_license_service,
     load_license_runtime_config,
 )
@@ -28,6 +29,8 @@ from sewerpipe_inspector.services.training_upload_service import (
 from sewerpipe_inspector.settings_service import load_settings, save_settings
 from sewerpipe_inspector.ui.license_dialog import LicenseActivationDialog
 from sewerpipe_inspector.ui.main_window import MainWindow
+from sewerpipe_inspector.updates.models import UpdateInfo
+from sewerpipe_inspector.updates.update_service import UpdateService
 
 DEFAULT_WORKSPACE_DIRNAME = "pipe1"
 _ONLINE_REVALIDATION_REASONS = {
@@ -83,6 +86,50 @@ class _LicenseValidationHandler(QObject):
             self.window,
             f"라이선스 온라인 검증 실패 - 오프라인 유예 사용 중: {message}",
         )
+
+
+class _UpdateCheckWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, service: UpdateService) -> None:
+        super().__init__()
+        self.service = service
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self.service.check_for_update())
+        except Exception as exc:
+            self.failed.emit(str(exc) or "업데이트 확인 중 오류가 발생했습니다.")
+        finally:
+            self.finished.emit()
+
+
+class _UpdateCheckHandler(QObject):
+    def __init__(self, service: UpdateService, window: MainWindow) -> None:
+        super().__init__(window)
+        self.service = service
+        self.window = window
+
+    @Slot(object)
+    def on_succeeded(self, info: UpdateInfo) -> None:
+        self.window.set_update_info(info)
+        if not info.update_available:
+            return
+        if info.mandatory:
+            self.window.prompt_update(info, mandatory=True)
+            return
+        latest = info.latest_version or "새 버전"
+        self.window.statusBar().showMessage(
+            f"PIPE1 {latest} 업데이트를 사용할 수 있습니다. 설정에서 설치할 수 있습니다.",
+            15000,
+        )
+
+    @Slot(str)
+    def on_failed(self, message: str) -> None:
+        logging.getLogger(__name__).warning("업데이트 확인 실패: %s", message)
 
 
 def _default_workspace_root() -> Path:
@@ -210,6 +257,36 @@ def _start_background_license_validation(
         except ValueError:
             pass
         setattr(window, "_license_validation_threads", active)
+
+    thread.started.connect(worker.run)
+    worker.succeeded.connect(handler.on_succeeded)
+    worker.failed.connect(handler.on_failed)
+    worker.finished.connect(thread.quit)
+    worker.finished.connect(worker.deleteLater)
+    thread.finished.connect(cleanup)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
+
+
+def _start_background_update_check(
+    service: UpdateService,
+    window: MainWindow,
+) -> None:
+    thread = QThread(window)
+    worker = _UpdateCheckWorker(service)
+    handler = _UpdateCheckHandler(service, window)
+    worker.moveToThread(thread)
+    active_threads = getattr(window, "_update_check_threads", [])
+    active_threads.append((thread, worker, handler))
+    setattr(window, "_update_check_threads", active_threads)
+
+    def cleanup() -> None:
+        active = getattr(window, "_update_check_threads", [])
+        try:
+            active.remove((thread, worker, handler))
+        except ValueError:
+            pass
+        setattr(window, "_update_check_threads", active)
 
     thread.started.connect(worker.run)
     worker.succeeded.connect(handler.on_succeeded)
@@ -435,6 +512,7 @@ def run() -> None:
         training_upload_service = _build_training_upload_service(
             db, license_status, license_config
         )
+        update_service = build_update_service(license_config)
         inspection = InspectionService(
             db, storage, report, training_upload_service=training_upload_service
         )
@@ -444,6 +522,7 @@ def run() -> None:
             license_service=license_service,
             license_status=license_status,
             license_config=license_config,
+            update_service=update_service,
         )
         if license_status is not None and license_status.masked_license_key:
             window.statusBar().showMessage(
@@ -456,6 +535,8 @@ def run() -> None:
                 window,
                 require_activation=license_config.require_activation,
             )
+        if update_service is not None:
+            _start_background_update_check(update_service, window)
         app.exec()
     except Exception:
         logging.exception("Fatal startup failure")

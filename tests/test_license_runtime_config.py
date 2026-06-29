@@ -10,6 +10,7 @@ def test_production_environment_requires_license_activation() -> None:
 
     assert config.app_env == "prod"
     assert config.require_activation is True
+    assert config.update_check_enabled is True
     assert not config.is_configured
 
 
@@ -18,6 +19,7 @@ def test_development_environment_keeps_activation_optional() -> None:
 
     assert config.app_env == "dev"
     assert config.require_activation is False
+    assert config.update_check_enabled is False
     assert not config.is_configured
 
 
@@ -94,3 +96,20 @@ def test_os_environment_overrides_client_env_file(tmp_path: Path) -> None:
     assert config.app_env == "dev"
     assert config.require_activation is False
     assert config.is_configured
+
+
+def test_update_config_can_be_overridden() -> None:
+    config = load_license_runtime_config(
+        {
+            "PIPE1_APP_ENV": "dev",
+            "PIPE1_UPDATE_CHECK_ENABLED": "true",
+            "PIPE1_UPDATE_CHANNEL": "beta",
+            "PIPE1_UPDATE_PLATFORM": "windows",
+            "PIPE1_UPDATE_ARCH": "arm64",
+        }
+    )
+
+    assert config.update_check_enabled is True
+    assert config.update_channel == "beta"
+    assert config.update_platform == "windows"
+    assert config.update_arch == "arm64"

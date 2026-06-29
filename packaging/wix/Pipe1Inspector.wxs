@@ -26,6 +26,10 @@
       Id="WIXUI_INSTALLDIR"
       Value="INSTALLFOLDER" />
     <Property
+      Id="CREATE_DESKTOP_SHORTCUT"
+      Value="1"
+      Secure="yes" />
+    <Property
       Id="ARPNOMODIFY"
       Value="1" />
     <SetProperty
@@ -64,12 +68,32 @@
             Value="1"
             KeyPath="yes" />
         </Component>
+
+        <Component
+          Id="DesktopShortcut"
+          Guid="4ed8fd8b-cd12-48ea-9f7f-a4e8ec4c47cf"
+          Condition="CREATE_DESKTOP_SHORTCUT = &quot;1&quot;">
+          <Shortcut
+            Id="DesktopShortcut"
+            Directory="DesktopFolder"
+            Name="$(var.AppName)"
+            Target="[INSTALLFOLDER]PIPE1.exe"
+            WorkingDirectory="INSTALLFOLDER" />
+          <RegistryValue
+            Root="HKCU"
+            Key="Software\PIPE1"
+            Name="desktopShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="ApplicationProgramsFolder" Name="$(var.AppName)" />
     </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
 
   </Package>
 </Wix>

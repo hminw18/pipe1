@@ -110,6 +110,8 @@ from sewerpipe_inspector.ui.widgets import TimelineSlider
 if TYPE_CHECKING:
     from sewerpipe_inspector.licensing.config import LicenseRuntimeConfig
     from sewerpipe_inspector.licensing.license_service import LicenseService, LicenseStatus
+    from sewerpipe_inspector.updates.models import UpdateInfo
+    from sewerpipe_inspector.updates.update_service import UpdateService
 
 
 ROLE_KIND = Qt.ItemDataRole.UserRole
@@ -1654,6 +1656,7 @@ class MainWindow(QMainWindow):
         license_service: LicenseService | None = None,
         license_status: LicenseStatus | None = None,
         license_config: LicenseRuntimeConfig | None = None,
+        update_service: UpdateService | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -1662,6 +1665,8 @@ class MainWindow(QMainWindow):
         self.license_service = license_service
         self.license_status = license_status
         self.license_config = license_config
+        self.update_service = update_service
+        self.update_info: UpdateInfo | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
 
         self.current_project_id: Optional[int] = None
@@ -4225,6 +4230,8 @@ class MainWindow(QMainWindow):
             license_status=self.license_status,
             license_config=self.license_config,
             training_upload_service=self.inspection.training_upload_service,
+            update_service=self.update_service,
+            update_info=self.update_info,
             reset_license_callback=(
                 self._reset_license_state if self.license_service is not None else None
             ),
@@ -4255,6 +4262,77 @@ class MainWindow(QMainWindow):
         if self.license_service is None:
             return
         self.license_service.clear_activation()
+
+    def set_update_info(self, info: UpdateInfo) -> None:
+        self.update_info = info
+        if self._mandatory_update_blocks_production():
+            self.inspection.training_upload_service = None
+
+    def prompt_update(self, info: UpdateInfo, *, mandatory: bool = False) -> None:
+        self.set_update_info(info)
+        if not info.update_available:
+            return
+        title = "필수 업데이트" if mandatory else "업데이트"
+        version = info.latest_version or "새 버전"
+        message = f"PIPE1 {version} 업데이트를 설치해야 합니다."
+        if info.release_notes:
+            message += f"\n\n{info.release_notes}"
+        message += "\n\n지금 다운로드하고 설치할까요?"
+        result = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes if mandatory else QMessageBox.StandardButton.No,
+        )
+        if result == QMessageBox.StandardButton.Yes:
+            self._download_and_install_update(info)
+            return
+        if mandatory:
+            QMessageBox.warning(
+                self,
+                "필수 업데이트",
+                "업데이트 설치 전까지 보고서 생성과 학습 업로드 기능이 제한됩니다.",
+            )
+
+    def _download_and_install_update(self, info: UpdateInfo) -> None:
+        if self.update_service is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            msi_path = self.update_service.download_update(info)
+            self.update_service.launch_installer(msi_path)
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(
+                self,
+                "업데이트",
+                f"업데이트 설치를 시작할 수 없습니다.\n\n{exc}",
+            )
+            return
+        QApplication.restoreOverrideCursor()
+        self.setEnabled(False)
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _mandatory_update_blocks_production(self) -> bool:
+        return bool(
+            self.update_info is not None
+            and self.update_info.update_available
+            and self.update_info.mandatory
+        )
+
+    def _warn_if_mandatory_update_required(self) -> bool:
+        if not self._mandatory_update_blocks_production():
+            return False
+        QMessageBox.warning(
+            self,
+            "필수 업데이트",
+            "현재 버전은 더 이상 지원되지 않습니다. 업데이트 설치 후 사용하세요.",
+        )
+        return True
 
     def change_workspace_directory(self) -> None:
         selected = QFileDialog.getExistingDirectory(
@@ -5956,6 +6034,8 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def generate_excel_report(self, output_dir: Path | None = None) -> None:
+        if self._warn_if_mandatory_update_required():
+            return
         if self.current_report_id is None:
             return
         if not self._save_report_details_for_generation():
@@ -5982,6 +6062,8 @@ class MainWindow(QMainWindow):
         self._open_generated_file(report_path)
 
     def open_report_export_dialog(self) -> None:
+        if self._warn_if_mandatory_update_required():
+            return
         if self.current_report_id is None:
             return
         if self._warn_missing_report_export_requirements():
@@ -6221,6 +6303,8 @@ class MainWindow(QMainWindow):
         after_report_id: int | None = None,
         output_dir: Path | None = None,
     ) -> None:
+        if self._warn_if_mandatory_update_required():
+            return
         if self.current_report_id is None:
             return
         if not self._save_report_details_for_generation():
