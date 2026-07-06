@@ -3,7 +3,10 @@ from pathlib import Path
 from PIL import Image as PILImage
 
 from sewerpipe_inspector.services.pdf_report_service import (
+    _connection_line_layout,
+    _defect_caption,
     _paginate_comparison_layouts,
+    DefectItem,
     _to_defect_item,
     generate_pipe_pdf_report,
 )
@@ -12,6 +15,121 @@ from sewerpipe_inspector.services.pdf_report_service import (
 def _make_png(path: Path, size: tuple[int, int], color: tuple[int, int, int]) -> None:
     img = PILImage.new("RGB", size, color)
     img.save(path, format="PNG")
+
+
+def test_defect_caption_labels_only_the_present_item_type() -> None:
+    condition_caption = _defect_caption(
+        DefectItem(
+            distance_m=7.5,
+            grade="",
+            image_path="",
+            condition_item="조사완료(순방향)",
+            defect_item="",
+            timestamp_ms=65000,
+        )
+    )
+    defect_caption = _defect_caption(
+        DefectItem(
+            distance_m=12.0,
+            grade="대",
+            image_path="",
+            condition_item="",
+            defect_item="균열(길이)",
+            timestamp_ms=None,
+        )
+    )
+
+    assert condition_caption == "01:05 | 7.50m | 조사완료(순방향) (상태)"
+    assert defect_caption == "00:00 | 12.00m | 균열(길이) (이상) | 대"
+    assert "||" not in condition_caption
+    assert "||" not in defect_caption
+
+
+def test_to_defect_item_does_not_treat_memo_as_defect_item() -> None:
+    item = _to_defect_item(
+        {
+            "distance_m": 3.0,
+            "grade": "",
+            "image_path": "",
+            "condition_item": "조사완료(순방향)",
+            "defect_item": "",
+            "memo": "현장 메모",
+        }
+    )
+
+    assert item.defect_item == ""
+    assert _defect_caption(item) == "00:00 | 3.00m | 조사완료(순방향) (상태)"
+
+
+def test_connection_line_is_horizontal_when_defect_y_overlaps_image() -> None:
+    layout = _connection_line_layout(
+        side="before",
+        pipe_x=100.0,
+        pipe_w=20.0,
+        image_x=10.0,
+        image_y=40.0,
+        image_w=50.0,
+        image_h=30.0,
+        pipe_point_y=55.0,
+    )
+
+    assert layout.segments == (
+        (110.0, 55.0, 100.0, 55.0),
+        (100.0, 55.0, 60.0, 55.0),
+    )
+    assert layout.start_marker_x == 110.0
+    assert layout.start_marker_y == 55.0
+    assert layout.arrow_x == 60.0
+    assert layout.arrow_y == 55.0
+
+
+def test_connection_line_uses_shared_diagonal_guide_when_image_is_offset() -> None:
+    upper_layout = _connection_line_layout(
+        side="before",
+        pipe_x=100.0,
+        pipe_w=20.0,
+        image_x=10.0,
+        image_y=40.0,
+        image_w=50.0,
+        image_h=30.0,
+        pipe_point_y=100.0,
+    )
+    lower_layout = _connection_line_layout(
+        side="before",
+        pipe_x=100.0,
+        pipe_w=20.0,
+        image_x=10.0,
+        image_y=140.0,
+        image_w=50.0,
+        image_h=30.0,
+        pipe_point_y=20.0,
+    )
+    after_layout = _connection_line_layout(
+        side="after",
+        pipe_x=100.0,
+        pipe_w=20.0,
+        image_x=200.0,
+        image_y=40.0,
+        image_w=50.0,
+        image_h=30.0,
+        pipe_point_y=100.0,
+    )
+
+    pipe_center_segment = upper_layout.segments[0]
+    diagonal = upper_layout.segments[1]
+    assert len(upper_layout.segments) == 3
+    assert upper_layout.start_marker_x == 110.0
+    assert upper_layout.start_marker_y == 100.0
+    assert pipe_center_segment == (110.0, 100.0, 100.0, 100.0)
+    assert diagonal[0] != diagonal[2]
+    assert diagonal[1] != diagonal[3]
+    assert upper_layout.segments[1][2] == lower_layout.segments[1][2]
+    assert upper_layout.segments[2] == (64.0, 55.0, 60.0, 55.0)
+    assert after_layout.start_marker_x == 110.0
+    assert after_layout.start_marker_y == 100.0
+    assert after_layout.segments[0] == (110.0, 100.0, 120.0, 100.0)
+    assert after_layout.segments[1][2] == 156.0
+    assert after_layout.segments[2] == (156.0, 55.0, 200.0, 55.0)
 
 
 def test_generate_pipe_pdf_report_basic(tmp_path: Path) -> None:
@@ -54,15 +172,12 @@ def test_generate_pipe_pdf_report_basic(tmp_path: Path) -> None:
 
 
 def test_generate_pipe_pdf_report_handles_missing_defect_images(tmp_path: Path) -> None:
-    pipe_png = tmp_path / "pipe.png"
-    _make_png(pipe_png, (300, 1200), (180, 180, 180))
-
     pdf_path = generate_pipe_pdf_report(
         project_name="Project-2",
         zone_name="Business-2",
         pipe_code="PIPE-002",
         pipe_length_m=40.0,
-        pipe_png_path=str(pipe_png),
+        pipe_png_path=str(tmp_path / "missing-pipe.png"),
         defects_before=[],
         defects_after=[
             {
