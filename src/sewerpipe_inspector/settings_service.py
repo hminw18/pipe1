@@ -13,6 +13,7 @@ class AppSettings:
     default_workspace: str | None = None
     suppress_default_workspace_prompt: bool = False
     always_show_directory_picker: bool = False
+    report_view_scale: float = 1.0
 
 
 def load_settings() -> AppSettings:
@@ -30,10 +31,17 @@ def load_settings() -> AppSettings:
     if "suppress_default_workspace_prompt" not in raw:
         suppress_prompt = bool(raw.get("auto_load_default_workspace", False))
     always_show_picker = bool(raw.get("always_show_directory_picker", False))
+    try:
+        report_view_scale = float(raw.get("report_view_scale", 1.0))
+    except (TypeError, ValueError):
+        report_view_scale = 1.0
+    if not 0.8 <= report_view_scale <= 1.2:
+        report_view_scale = 1.0
     return AppSettings(
         default_workspace=default_workspace,
         suppress_default_workspace_prompt=suppress_prompt,
         always_show_directory_picker=always_show_picker,
+        report_view_scale=report_view_scale,
     )
 
 
@@ -42,6 +50,7 @@ def save_settings(settings: AppSettings) -> None:
         "default_workspace": settings.default_workspace,
         "suppress_default_workspace_prompt": settings.suppress_default_workspace_prompt,
         "always_show_directory_picker": settings.always_show_directory_picker,
+        "report_view_scale": settings.report_view_scale,
     }
     SETTINGS_PATH.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

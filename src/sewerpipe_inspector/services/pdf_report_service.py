@@ -47,6 +47,8 @@ PIPE_BOTTOM_PT = 800.0
 PIPE_HEIGHT_PT = PIPE_BOTTOM_PT - PIPE_TOP_PT
 PIPE_IMAGE_HEIGHT_PT = PIPE_HEIGHT_PT
 PIPE_IMAGE_WIDTH_PT = 58.0
+CONNECTION_DIAGONAL_GUIDE_OFFSET_PT = 36.0
+CONNECTION_START_MARKER_SIZE_PT = 3.4
 
 TEMPLATE_CENTER_WIDTH_RATIO = 0.30
 TEMPLATE_PIPE_WIDTH_RATIO = 0.995
@@ -153,13 +155,6 @@ def _load_template_config(pipe_png_path: str) -> PipeTemplateConfig:
     return DEFAULT_TEMPLATE_CONFIG
 
 
-GRADE_COLOR = {
-    "대": colors.red,
-    "중": colors.orange,
-    "소": colors.green,
-}
-
-
 @dataclass
 class DefectItem:
     distance_m: float
@@ -187,6 +182,73 @@ class PipeDrawBounds:
     h: float
     start_y: float
     end_y: float
+
+
+@dataclass(frozen=True)
+class ConnectionLineLayout:
+    segments: tuple[tuple[float, float, float, float], ...]
+    start_marker_x: float
+    start_marker_y: float
+    arrow_x: float
+    arrow_y: float
+    label_x: float
+    label_y: float
+
+
+def _connection_line_layout(
+    *,
+    side: str,
+    pipe_x: float,
+    pipe_w: float,
+    image_x: float,
+    image_y: float,
+    image_w: float,
+    image_h: float,
+    pipe_point_y: float,
+) -> ConnectionLineLayout:
+    pipe_center_x = pipe_x + (pipe_w * 0.5)
+    if side == "before":
+        edge_x = pipe_x
+        end_x = image_x + image_w
+        guide_x = edge_x - CONNECTION_DIAGONAL_GUIDE_OFFSET_PT
+    else:
+        edge_x = pipe_x + pipe_w
+        end_x = image_x
+        guide_x = edge_x + CONNECTION_DIAGONAL_GUIDE_OFFSET_PT
+
+    pipe_center_segment = (pipe_center_x, pipe_point_y, edge_x, pipe_point_y)
+
+    image_bottom = image_y
+    image_top = image_y + image_h
+    if image_bottom <= pipe_point_y <= image_top:
+        arrow_y = pipe_point_y
+        return ConnectionLineLayout(
+            segments=(
+                pipe_center_segment,
+                (edge_x, pipe_point_y, end_x, pipe_point_y),
+            ),
+            start_marker_x=pipe_center_x,
+            start_marker_y=pipe_point_y,
+            arrow_x=end_x,
+            arrow_y=arrow_y,
+            label_x=(edge_x + end_x) / 2.0,
+            label_y=arrow_y - 8.0,
+        )
+
+    image_center_y = image_y + (image_h * 0.5)
+    return ConnectionLineLayout(
+        segments=(
+            pipe_center_segment,
+            (edge_x, pipe_point_y, guide_x, image_center_y),
+            (guide_x, image_center_y, end_x, image_center_y),
+        ),
+        start_marker_x=pipe_center_x,
+        start_marker_y=pipe_point_y,
+        arrow_x=end_x,
+        arrow_y=image_center_y,
+        label_x=(guide_x + end_x) / 2.0,
+        label_y=image_center_y - 8.0,
+    )
 
 
 class PipeVisualBodyFlowable(Flowable):
@@ -301,67 +363,46 @@ class PipeVisualBodyFlowable(Flowable):
         p_w, p_h = p.wrap(width, self.title_height)
         p.drawOn(self.canv, x + (width - p_w) / 2.0, self.height - p_h)
 
-    def _draw_pipe_visual(self) -> Optional[PipeDrawBounds]:
+    def _draw_pipe_visual(self) -> PipeDrawBounds:
         pipe_area_bottom = (PAGE_HEIGHT_PT - PIPE_BOTTOM_PT) - self._origin_y
 
-        try:
-            reader = ImageReader(self.pipe_png_path)
-            src_w, src_h = reader.getSize()
-            if src_w <= 0 or src_h <= 0:
-                raise ValueError("Invalid pipe image size")
-            draw_h = PIPE_IMAGE_HEIGHT_PT
-            draw_w = PIPE_IMAGE_WIDTH_PT
-            draw_x = (PAGE_WIDTH_PT * 0.5) - (draw_w * 0.5) - self._origin_x
-            draw_y = pipe_area_bottom
-            img = Image(self.pipe_png_path, width=draw_w, height=draw_h)
-            img.drawOn(self.canv, draw_x, draw_y)
+        draw_h = PIPE_IMAGE_HEIGHT_PT
+        draw_w = PIPE_IMAGE_WIDTH_PT
+        draw_x = (PAGE_WIDTH_PT * 0.5) - (draw_w * 0.5) - self._origin_x
+        draw_y = pipe_area_bottom
 
-            center_text = Paragraph(
-                f"<b>연장</b><br/><b>{self.pipe_length_m:.2f} m</b>",
-                ParagraphStyle(
-                    "pipe-center-text",
-                    parent=self.small_style,
-                    alignment=1,
-                    fontName=self.bold_font,
-                    textColor=colors.darkblue,
-                    fontSize=10,
-                    leading=12,
-                ),
-            )
-            text_w, text_h = center_text.wrap(draw_w * 0.88, draw_h * 0.88)
-            text_x = draw_x + (draw_w - text_w) / 2.0
-            text_y = draw_y + (draw_h - text_h) / 2.0
-            center_text.drawOn(self.canv, text_x, text_y)
+        self.canv.saveState()
+        self.canv.setFillColor(colors.HexColor("#D7D7D7"))
+        self.canv.setStrokeColor(colors.HexColor("#B6B6B6"))
+        self.canv.setLineWidth(0.6)
+        self.canv.rect(draw_x, draw_y, draw_w, draw_h, stroke=1, fill=1)
+        self.canv.restoreState()
 
-            trim_px = 35.0
-            if src_h > (trim_px * 2.0):
-                trim_ratio = trim_px / float(src_h)
-            else:
-                trim_ratio = 0.0
+        center_text = Paragraph(
+            f"<b>연장</b><br/><b>{self.pipe_length_m:.2f} m</b>",
+            ParagraphStyle(
+                "pipe-center-text",
+                parent=self.small_style,
+                alignment=1,
+                fontName=self.bold_font,
+                textColor=colors.darkblue,
+                fontSize=10,
+                leading=12,
+            ),
+        )
+        text_w, text_h = center_text.wrap(draw_w * 0.88, draw_h * 0.88)
+        text_x = draw_x + (draw_w - text_w) / 2.0
+        text_y = draw_y + (draw_h - text_h) / 2.0
+        center_text.drawOn(self.canv, text_x, text_y)
 
-            start_y = draw_y + (draw_h * (1.0 - trim_ratio))
-            end_y = draw_y + (draw_h * trim_ratio)
-            if start_y <= end_y:
-                start_y = draw_y + (draw_h * 0.95)
-                end_y = draw_y + (draw_h * 0.05)
-            return PipeDrawBounds(
-                x=draw_x,
-                y=draw_y,
-                w=draw_w,
-                h=draw_h,
-                start_y=start_y,
-                end_y=end_y,
-            )
-        except Exception:
-            LOGGER.warning("Pipe image missing or unreadable: %s", self.pipe_png_path)
-            p = Paragraph("Pipe image unavailable", self.empty_style)
-            p_w, p_h = p.wrap(PIPE_IMAGE_WIDTH_PT, PIPE_IMAGE_HEIGHT_PT)
-            p.drawOn(
-                self.canv,
-                (PAGE_WIDTH_PT * 0.5) - (p_w * 0.5) - self._origin_x,
-                pipe_area_bottom + (PIPE_IMAGE_HEIGHT_PT - p_h) / 2.0,
-            )
-            return None
+        return PipeDrawBounds(
+            x=draw_x,
+            y=draw_y,
+            w=draw_w,
+            h=draw_h,
+            start_y=draw_y + draw_h,
+            end_y=draw_y,
+        )
 
     def _draw_defect_side(
         self,
@@ -401,18 +442,13 @@ class PipeVisualBodyFlowable(Flowable):
 
             caption_y = image_y - self.block_gap - 8.0
             caption_y = max(content_bottom + 1.0, caption_y)
-            grade_color = GRADE_COLOR.get(layout.item.grade, colors.black)
-            caption = (
-                f"{_format_mmss(layout.item.timestamp_ms)} | "
-                f"{layout.item.distance_m:.2f}m | {layout.item.condition_item} | "
-                f"{layout.item.defect_item} | {layout.item.grade}"
-            )
+            caption = _defect_caption(layout.item)
             max_chars = 62
             if len(caption) > max_chars:
                 caption = caption[: max_chars - 1] + "..."
             self.canv.saveState()
             self.canv.setFont(self.small_style.fontName, 8.2)
-            self.canv.setFillColor(grade_color)
+            self.canv.setFillColor(colors.black)
             self.canv.drawCentredString(
                 start_x + (column_width * 0.5), caption_y, caption
             )
@@ -466,35 +502,68 @@ class PipeVisualBodyFlowable(Flowable):
         effective_bottom = pipe_bounds.end_y
         pipe_point_y = max(effective_bottom, min(effective_top, pipe_point_y))
 
-        if side == "before":
-            start_x = pipe_x
-            end_x = image_x + image_w
-            elbow_x = start_x - 12.0
-        else:
-            start_x = pipe_x + pipe_w
-            end_x = image_x
-            elbow_x = start_x + 12.0
-        end_y = image_y + (image_h * 0.5)
+        line_layout = _connection_line_layout(
+            side=side,
+            pipe_x=pipe_x,
+            pipe_w=pipe_w,
+            image_x=image_x,
+            image_y=image_y,
+            image_w=image_w,
+            image_h=image_h,
+            pipe_point_y=pipe_point_y,
+        )
 
         self.canv.saveState()
         self.canv.setStrokeColor(colors.HexColor("#44618E"))
         self.canv.setLineWidth(0.8)
-        self.canv.line(start_x, pipe_point_y, elbow_x, pipe_point_y)
-        self.canv.line(elbow_x, pipe_point_y, elbow_x, end_y)
-        self.canv.line(elbow_x, end_y, end_x, end_y)
+        for x1, y1, x2, y2 in line_layout.segments:
+            self.canv.line(x1, y1, x2, y2)
+        marker_size = CONNECTION_START_MARKER_SIZE_PT
+        self.canv.setFillColor(colors.HexColor("#44618E"))
+        self.canv.rect(
+            line_layout.start_marker_x - (marker_size / 2.0),
+            line_layout.start_marker_y - (marker_size / 2.0),
+            marker_size,
+            marker_size,
+            stroke=1,
+            fill=1,
+        )
 
-        label_x = (elbow_x + end_x) / 2.0
         self.canv.setFont(self.normal_font, 7.0)
         self.canv.setFillColor(colors.HexColor("#263F66"))
-        self.canv.drawCentredString(label_x, end_y - 8.0, f"{defect.distance_m:.2f}m")
+        self.canv.drawCentredString(
+            line_layout.label_x,
+            line_layout.label_y,
+            f"{defect.distance_m:.2f}m",
+        )
 
         arrow_size = 3.2
         if side == "before":
-            self.canv.line(end_x, end_y, end_x - arrow_size, end_y + arrow_size * 0.6)
-            self.canv.line(end_x, end_y, end_x - arrow_size, end_y - arrow_size * 0.6)
+            self.canv.line(
+                line_layout.arrow_x,
+                line_layout.arrow_y,
+                line_layout.arrow_x - arrow_size,
+                line_layout.arrow_y + arrow_size * 0.6,
+            )
+            self.canv.line(
+                line_layout.arrow_x,
+                line_layout.arrow_y,
+                line_layout.arrow_x - arrow_size,
+                line_layout.arrow_y - arrow_size * 0.6,
+            )
         else:
-            self.canv.line(end_x, end_y, end_x + arrow_size, end_y + arrow_size * 0.6)
-            self.canv.line(end_x, end_y, end_x + arrow_size, end_y - arrow_size * 0.6)
+            self.canv.line(
+                line_layout.arrow_x,
+                line_layout.arrow_y,
+                line_layout.arrow_x + arrow_size,
+                line_layout.arrow_y + arrow_size * 0.6,
+            )
+            self.canv.line(
+                line_layout.arrow_x,
+                line_layout.arrow_y,
+                line_layout.arrow_x + arrow_size,
+                line_layout.arrow_y - arrow_size * 0.6,
+            )
         self.canv.restoreState()
 
     def _safe_draw_image(
@@ -528,7 +597,7 @@ def _to_defect_item(raw: dict) -> DefectItem:
         grade=str(raw.get("grade") or ""),
         image_path=str(raw.get("image_path", "")),
         condition_item=str(raw.get("condition_item") or raw.get("defect_type") or ""),
-        defect_item=str(raw.get("defect_item") or raw.get("memo") or ""),
+        defect_item=str(raw.get("defect_item") or ""),
         timestamp_ms=(
             None if raw.get("timestamp_ms") is None else int(raw.get("timestamp_ms", 0))
         ),
@@ -542,6 +611,20 @@ def _format_mmss(timestamp_ms: int | None) -> str:
     minutes = seconds // 60
     secs = seconds % 60
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _defect_caption(item: DefectItem) -> str:
+    parts = [
+        _format_mmss(item.timestamp_ms),
+        f"{item.distance_m:.2f}m",
+    ]
+    if item.defect_item:
+        parts.append(f"{item.defect_item} (이상)")
+    elif item.condition_item:
+        parts.append(f"{item.condition_item} (상태)")
+    if item.grade:
+        parts.append(item.grade)
+    return " | ".join(parts)
 
 
 def _safe_image_size(image_path: str) -> tuple[float, float]:

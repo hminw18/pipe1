@@ -17,18 +17,20 @@ Condition items are selected from a grid-style picker, not from a standard dropd
 ### 2.1 Manhole
 
 ```text
-구조특징
 조사시작
 조사중단
 조사완료
-연결관미사용
-라이닝변화
-하수관로접속부존재
-블록이음부존재
+시야상실
+중심상실
 대상없음
-보수 후
-기타
+특이사항
+연결관미사용
+연결관존재함
+이음부(접합부)존재
+재질변경
+라이닝변화
 이상없음
+단위길이
 ```
 
 ### 2.2 Pipe
@@ -39,16 +41,17 @@ Condition items are selected from a grid-style picker, not from a standard dropd
 조사완료(순방향)
 조사완료(역방향)
 조사중단
-구조특징
-치수변화
+시야상실
+중심상실
+대상없음
+특이사항
 연결관미사용
-라이닝변화
 연결관존재함
-관종변경
 이음부(접합부)존재
-보수 후
-기타
+재질변경
+라이닝변화
 이상없음
+단위길이
 ```
 
 ### 2.3 Box Culvert
@@ -65,6 +68,7 @@ Rules:
 - Empty grade-score cells are invalid grades for that defect item and must not appear in the grade dropdown.
 - If a defect item has only one valid grade, that grade is selected automatically and it is the only option shown.
 - The defect list displays the score derived from `item_category + defect_item + grade`.
+- The defect/condition code is displayed in parentheses in the registration controls and defect list.
 
 ### 3.1 Manhole
 
@@ -122,6 +126,7 @@ Rules:
 | 임시장애물 | 운영 | 50 | 25 | 5 |
 | 침입수 | 운영 | 100 | 28 | 10 |
 | 뿌리침입 | 운영 | 65 | 33 | 13 |
+| 막힘 | 운영 | 100 |  |  |
 
 ### 3.3 Box Culvert
 
@@ -147,3 +152,84 @@ Rules:
 | 침입수 | 운영 | 50 | 28 | 10 |
 | 토사퇴적 | 운영 | 30 | 15 | 3 |
 | 임시장애물 | 운영 | 40 | 25 | 5 |
+
+## 4. Code System
+
+### 4.1 Pipe Defect Codes
+
+| 항목 | 코드 |
+| --- | --- |
+| 균열(원주) | CC |
+| 균열(길이) | CL |
+| 균열(복합) | CM |
+| 표면손상 | SD |
+| 좌굴 | BC |
+| 라이닝결함 | LD |
+| 변형 | DF |
+| 파손 | BK |
+| 붕괴 | CX |
+| 영구장애물 | PO |
+| 천공 | HL |
+| 연결관돌출 | LP |
+| 연결관접합부 | LS |
+| 이음부이탈 | JS |
+| 이음부손상 | JF |
+| 이음부단차 | JD |
+| 역경사 | NS |
+| 침하 | SG |
+| 내피생성 | DE |
+| 토사퇴적 | DS |
+| 폐유부착 | DG |
+| 임시장애물 | TO |
+| 뿌리침입 | RT |
+| 침입수 | IF |
+| 막힘 | PB |
+
+### 4.2 Manhole Defect Codes
+
+| 항목 | 코드 |
+| --- | --- |
+| 균열(수평) | CHm |
+| 균열(수직) | CVm |
+| 표면손상(내부) | SIm |
+| 표면손상(외부) | SOm |
+| 변형 | Dm |
+| 파손(내부) | BIm |
+| 파손(외부) | BOm |
+| 하수관로접속부(돌출) | LPm |
+| 하수관로접속부(접속부이상) | LSm |
+| 블록이음부(단차) | JDm |
+| 블록이음부(손상) | JFm |
+| 블록이음부(이탈) | JSm |
+| 표면단차 | SGm |
+| 인버트결함 | DBm |
+| 맨홀뚜껑/프레임손상 | DCm |
+| 악취발생 | OAm |
+| 내피생성 | DEm |
+| 폐유부착 | DGm |
+| 임시장애물 | TOm |
+| 사다리손상 | DSm |
+| 뚜껑밀폐 | SCm |
+| 뿌리침입 | RIm |
+| 침입수 | IFm |
+
+### 4.3 Condition Codes
+
+| 항목 | 코드 |
+| --- | --- |
+| 조사시작(순방향) | IS |
+| 조사시작(역방향) | ISr |
+| 조사완료(순방향) | IE |
+| 조사완료(역방향) | IEr |
+| 조사중단 | IA |
+| 시야상실 | LV |
+| 중심상실 | LC |
+| 대상없음 | NE |
+| 특이사항 | SC |
+| 연결관미사용 | LB |
+| 연결관존재함 | LO |
+| 이음부(접합부)존재 | JE |
+| 재질변경 | MC |
+| 라이닝변화 | LC |
+| 이상없음 | WD |
+| 단위길이 | ULm |

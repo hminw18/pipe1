@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -11,6 +13,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTabWidget,
@@ -202,13 +206,17 @@ class ReportExportDialog(QDialog):
         report_options: list[tuple[int, str]],
         current_report_id: int,
         default_output_dir: str,
-        excel_filename: str,
+        excel_filename_examples: dict[str, str],
+        excel_report_options: list[tuple[int, str]] | None = None,
+        preselected_excel_report_ids: list[int] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("보고서 생성")
-        self.resize(660, 310)
+        self.setWindowTitle("보고서 출력")
+        self.resize(820, 430)
+        self.excel_filename_examples = excel_filename_examples
         self._syncing_output_dir = False
+        self._syncing_excel_report_checks = False
         self.output_dir_inputs: list[QLineEdit] = []
 
         layout = QVBoxLayout(self)
@@ -257,61 +265,200 @@ class ReportExportDialog(QDialog):
         excel_tab.setObjectName("reportExportPanel")
         excel_layout = QVBoxLayout(excel_tab)
         excel_layout.setContentsMargins(12, 12, 12, 12)
-        excel_layout.addWidget(QLabel("현재 선택된 보고서로 엑셀 보고서를 생성합니다.", excel_tab))
-        excel_layout.addWidget(QLabel(f"파일명 예시: {excel_filename}", excel_tab))
+        self.excel_type_combo = QComboBox(excel_tab)
+        self.excel_type_combo.addItem("내부결함 판독표", "internal_defect")
+        self.excel_type_combo.addItem("이상항목 집계표", "defect_aggregate")
+        self._configure_export_combo(self.excel_type_combo, minimum_width=220)
+        self.include_internal_photos_checkbox = QCheckBox(
+            "각 보고서 시트에 사진 포함", excel_tab
+        )
+        excel_layout.addWidget(
+            self._build_export_form_row(
+                excel_tab, "보고서 종류", self.excel_type_combo
+            )
+        )
+        self.include_internal_photos_row = self._build_export_control_row(
+            excel_tab, self.include_internal_photos_checkbox
+        )
+        excel_layout.addWidget(self.include_internal_photos_row)
+        excel_layout.addWidget(
+            QLabel(
+                "선택한 보고서로 사업 단위 엑셀 보고서를 출력합니다.",
+                excel_tab,
+            )
+        )
+        self.excel_filename_label = QLabel("", excel_tab)
+        excel_layout.addWidget(self.excel_filename_label)
+        self.excel_select_all_checkbox = QCheckBox("현재 사업 보고서 전체 선택", excel_tab)
+        self.excel_select_all_checkbox.setTristate(False)
+        self.excel_report_list = QListWidget(excel_tab)
+        self.excel_report_list.setMinimumHeight(92)
+        self.excel_report_list.setMaximumHeight(120)
+        explicit_preselection = preselected_excel_report_ids is not None
+        preselected_ids = set(preselected_excel_report_ids or [])
+        for report_id, label in excel_report_options or report_options:
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, report_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            if explicit_preselection:
+                checked = int(report_id) in preselected_ids
+            else:
+                checked = int(report_id) == current_report_id
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self.excel_report_list.addItem(item)
+        if not explicit_preselection and self.excel_report_list.count() > 1:
+            self.excel_select_all_checkbox.setCheckState(Qt.CheckState.Checked)
+            for row in range(self.excel_report_list.count()):
+                self.excel_report_list.item(row).setCheckState(Qt.CheckState.Checked)
+        else:
+            self._set_excel_select_all_state_from_items()
+        excel_layout.addWidget(self.excel_select_all_checkbox)
+        excel_layout.addWidget(self.excel_report_list)
         excel_layout.addStretch(1)
         excel_layout.addLayout(self._build_output_dir_row(excel_tab, default_output_dir))
-        self.tabs.addTab(excel_tab, "엑셀 보고서 생성")
+        self.tabs.addTab(excel_tab, "엑셀 보고서 출력")
 
         pdf_tab = QWidget(self)
         pdf_tab.setObjectName("reportExportPanel")
         pdf_layout = QVBoxLayout(pdf_tab)
         pdf_layout.setContentsMargins(12, 12, 12, 12)
-        pdf_form = QFormLayout()
-        pdf_form.setContentsMargins(0, 0, 0, 0)
         self.pdf_type_combo = QComboBox(pdf_tab)
         self.pdf_type_combo.addItem("조사보고서", "inspection")
         self.pdf_type_combo.addItem("보수후보고서", "post_repair")
         self.pdf_type_combo.addItem("비교보고서", "comparison")
-        pdf_form.addRow("보고서 종류", self.pdf_type_combo)
+        self._configure_export_combo(self.pdf_type_combo, minimum_width=220)
+        pdf_layout.addWidget(
+            self._build_export_form_row(pdf_tab, "보고서 종류", self.pdf_type_combo)
+        )
 
         self.before_report_combo = QComboBox(pdf_tab)
         self.after_report_combo = QComboBox(pdf_tab)
         for report_id, label in report_options:
             self.before_report_combo.addItem(label, report_id)
             self.after_report_combo.addItem(label, report_id)
-        self.before_report_combo.setMinimumWidth(480)
-        self.after_report_combo.setMinimumWidth(480)
+        self._configure_export_combo(self.before_report_combo, minimum_width=620)
+        self._configure_export_combo(self.after_report_combo, minimum_width=620)
         self._select_combo_report(self.before_report_combo, current_report_id)
         self._select_first_other_report(self.after_report_combo, current_report_id)
 
-        self.before_report_label = QLabel("보수전 보고서", pdf_tab)
-        self.after_report_label = QLabel("보수후 보고서", pdf_tab)
-        pdf_form.addRow(self.before_report_label, self.before_report_combo)
-        pdf_form.addRow(self.after_report_label, self.after_report_combo)
-        pdf_layout.addLayout(pdf_form)
+        self.before_report_row = self._build_export_form_row(
+            pdf_tab, "보수전 보고서", self.before_report_combo
+        )
+        self.after_report_row = self._build_export_form_row(
+            pdf_tab, "보수후 보고서", self.after_report_combo
+        )
+        pdf_layout.addWidget(self.before_report_row)
+        pdf_layout.addWidget(self.after_report_row)
         pdf_layout.addStretch(1)
         pdf_layout.addLayout(self._build_output_dir_row(pdf_tab, default_output_dir))
-        self.tabs.addTab(pdf_tab, "PDF 종합보고서")
+        self.tabs.addTab(pdf_tab, "PDF 종합보고서 출력")
 
         self.pdf_type_combo.currentIndexChanged.connect(self._update_pdf_report_controls)
+        self.excel_type_combo.currentIndexChanged.connect(self._update_excel_report_controls)
+        self.excel_select_all_checkbox.stateChanged.connect(self._toggle_excel_report_selection)
+        self.excel_report_list.itemChanged.connect(self._sync_excel_select_all_state)
+        self._update_excel_report_controls()
         self._update_pdf_report_controls()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("생성")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("출력")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _configure_export_combo(
+        self, combo: QComboBox, *, minimum_width: int
+    ) -> None:
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setMinimumWidth(minimum_width)
+        combo.setMinimumContentsLength(12)
+        combo.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+        max_text_width = minimum_width
+        metrics = combo.fontMetrics()
+        for index in range(combo.count()):
+            max_text_width = max(
+                max_text_width,
+                metrics.horizontalAdvance(combo.itemText(index)) + 56,
+            )
+        combo.view().setMinimumWidth(max_text_width)
+
+    def _build_export_form_row(
+        self, parent: QWidget, label_text: str, field: QWidget
+    ) -> QWidget:
+        wrapper = QWidget(parent)
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        label = QLabel(label_text, wrapper)
+        label.setFixedWidth(92)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(label)
+        row.addWidget(field)
+        row.addStretch(1)
+        return wrapper
+
+    def _build_export_control_row(self, parent: QWidget, control: QWidget) -> QWidget:
+        wrapper = QWidget(parent)
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(control)
+        row.addStretch(1)
+        return wrapper
+
+    def _update_excel_report_controls(self) -> None:
+        self.excel_select_all_checkbox.setVisible(True)
+        self.excel_report_list.setVisible(True)
+        show_photos_option = self.excel_report_type() == "internal_defect"
+        self.include_internal_photos_row.setVisible(show_photos_option)
+        self.include_internal_photos_checkbox.setVisible(show_photos_option)
+        filename = self.excel_filename_examples.get(self.excel_report_type(), "")
+        self.excel_filename_label.setText(f"파일명 예시: {filename}" if filename else "")
+
+    def _toggle_excel_report_selection(self, state: int) -> None:
+        if self._syncing_excel_report_checks:
+            return
+        self._syncing_excel_report_checks = True
+        try:
+            checked = Qt.CheckState(state) == Qt.CheckState.Checked
+            for row in range(self.excel_report_list.count()):
+                self.excel_report_list.item(row).setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                )
+        finally:
+            self._syncing_excel_report_checks = False
+
+    def _sync_excel_select_all_state(self, _item: QListWidgetItem) -> None:
+        if self._syncing_excel_report_checks:
+            return
+        self._set_excel_select_all_state_from_items()
+
+    def _set_excel_select_all_state_from_items(self) -> None:
+        self._syncing_excel_report_checks = True
+        try:
+            total = self.excel_report_list.count()
+            checked = sum(
+                1
+                for row in range(total)
+                if self.excel_report_list.item(row).checkState() == Qt.CheckState.Checked
+            )
+            if checked == total and total > 0:
+                state = Qt.CheckState.Checked
+            else:
+                state = Qt.CheckState.Unchecked
+            self.excel_select_all_checkbox.setCheckState(state)
+        finally:
+            self._syncing_excel_report_checks = False
 
     def _build_output_dir_row(
         self, parent, default_output_dir: str
     ) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(QLabel("생성 경로", parent))
+        row.addWidget(QLabel("출력 경로", parent))
         row.addWidget(self._build_output_dir_widget(parent, default_output_dir), 1)
         return row
 
@@ -360,15 +507,13 @@ class ReportExportDialog(QDialog):
 
     def _update_pdf_report_controls(self) -> None:
         is_comparison = self.pdf_report_type() == "comparison"
-        self.before_report_label.setVisible(is_comparison)
-        self.before_report_combo.setVisible(is_comparison)
-        self.after_report_label.setVisible(is_comparison)
-        self.after_report_combo.setVisible(is_comparison)
+        self.before_report_row.setVisible(is_comparison)
+        self.after_report_row.setVisible(is_comparison)
 
     def _choose_output_dir(self, source: QLineEdit) -> None:
         selected = QFileDialog.getExistingDirectory(
             self,
-            "생성 경로 선택",
+            "출력 경로 선택",
             source.text().strip(),
         )
         if selected:
@@ -376,6 +521,32 @@ class ReportExportDialog(QDialog):
 
     def selected_export_kind(self) -> str:
         return "excel" if self.tabs.currentIndex() == 0 else "pdf"
+
+    def excel_report_type(self) -> str:
+        return str(self.excel_type_combo.currentData())
+
+    def selected_excel_report_ids(self) -> list[int]:
+        ids: list[int] = []
+        for row in range(self.excel_report_list.count()):
+            item = self.excel_report_list.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        return ids
+
+    def include_internal_defect_photos(self) -> bool:
+        return (
+            self.excel_report_type() == "internal_defect"
+            and self.include_internal_photos_checkbox.isChecked()
+        )
+
+    def accept(self) -> None:
+        if (
+            self.selected_export_kind() == "excel"
+            and not self.selected_excel_report_ids()
+        ):
+            QMessageBox.warning(self, "보고서 출력", "출력할 보고서를 선택하세요")
+            return
+        super().accept()
 
     def output_dir(self) -> str:
         if not self.output_dir_inputs:
