@@ -210,6 +210,9 @@ def test_generate_business_excel_workbooks_for_selected_reports(tmp_path: Path) 
     ]
     assert len(internal_with_photos["내부조사(CCTV)집계표"]._images) == 0
     assert internal_with_photos["R001"]["M6"].value == "사진"
+    assert "M9:V9" in [
+        str(merged) for merged in internal_with_photos["R001"].merged_cells.ranges
+    ]
     assert len(internal_with_photos["R001"]._images) == 4
 
     aggregate = load_workbook(aggregate_path, data_only=False)

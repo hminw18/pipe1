@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QObject,
     QPoint,
     QPointF,
+    QRect,
     QRectF,
     QSize,
     QThread,
@@ -60,11 +61,14 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QStyle,
+    QStyleOptionButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -122,6 +126,7 @@ ROLE_KIND = Qt.ItemDataRole.UserRole
 ROLE_ID = Qt.ItemDataRole.UserRole + 1
 ROLE_NAV_TYPE = Qt.ItemDataRole.UserRole + 2
 ROLE_VERSION_GROUP_ID = Qt.ItemDataRole.UserRole + 3
+ROLE_VERSION_COUNT = Qt.ItemDataRole.UserRole + 4
 ROLE_STOP_ITEM_TYPE = Qt.ItemDataRole.UserRole + 20
 ROLE_STOP_TIMESTAMP_MS = Qt.ItemDataRole.UserRole + 21
 TABLE_ROW_COLOR = "#ffffff"
@@ -1166,70 +1171,221 @@ class TableBackgroundDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class CenteredCheckDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index) -> None:
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        check_state = opt.checkState
+        opt.text = ""
+        opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        indicator_width = style.pixelMetric(
+            QStyle.PixelMetric.PM_IndicatorWidth, None, widget
+        )
+        indicator_height = style.pixelMetric(
+            QStyle.PixelMetric.PM_IndicatorHeight, None, widget
+        )
+        checkbox_option = QStyleOptionButton()
+        checkbox_option.state = QStyle.StateFlag.State_Enabled
+        if option.state & QStyle.StateFlag.State_MouseOver:
+            checkbox_option.state |= QStyle.StateFlag.State_MouseOver
+        if check_state == Qt.CheckState.Checked:
+            checkbox_option.state |= QStyle.StateFlag.State_On
+        else:
+            checkbox_option.state |= QStyle.StateFlag.State_Off
+        checkbox_option.rect = QRect(
+            option.rect.x() + (option.rect.width() - indicator_width) // 2,
+            option.rect.y() + (option.rect.height() - indicator_height) // 2,
+            indicator_width,
+            indicator_height,
+        )
+        style.drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorCheckBox,
+            checkbox_option,
+            painter,
+            widget,
+        )
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return super().editorEvent(event, model, option, index)
+        if not (index.flags() & Qt.ItemFlag.ItemIsEnabled):
+            return False
+
+        if event.type() in (
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            if event.button() != Qt.MouseButton.LeftButton:
+                return False
+            if not option.rect.contains(event.position().toPoint()):
+                return False
+            if event.type() == QEvent.Type.MouseButtonDblClick:
+                return True
+        elif event.type() == QEvent.Type.KeyPress:
+            if event.key() not in (Qt.Key.Key_Space, Qt.Key.Key_Select):
+                return False
+        else:
+            return False
+
+        current_state = index.data(Qt.ItemDataRole.CheckStateRole)
+        try:
+            current_state = Qt.CheckState(current_state)
+        except (TypeError, ValueError):
+            current_state = Qt.CheckState.Unchecked
+        next_state = (
+            Qt.CheckState.Unchecked
+            if current_state == Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
+        return model.setData(index, next_state, Qt.ItemDataRole.CheckStateRole)
+
+
 class CheckBoxHeader(QHeaderView):
     toggled = Signal(bool)
 
     def __init__(self, checkbox_column: int, parent=None) -> None:
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.checkbox_column = checkbox_column
-        self.checkbox = QCheckBox(self)
-        self.checkbox.setTristate(False)
-        self.checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.checkbox.stateChanged.connect(
-            lambda state: self.toggled.emit(
-                Qt.CheckState(state) == Qt.CheckState.Checked
-            )
-        )
+        self._checked = False
         self.setSectionsClickable(True)
-        self.sectionResized.connect(lambda *_args: self._update_checkbox_geometry())
-        self.sectionMoved.connect(lambda *_args: self._update_checkbox_geometry())
-        self.geometriesChanged.connect(self._update_checkbox_geometry)
-        QTimer.singleShot(0, self._update_checkbox_geometry)
 
     def setChecked(self, checked: bool) -> None:
-        self.checkbox.blockSignals(True)
-        try:
-            self.checkbox.setChecked(bool(checked))
-        finally:
-            self.checkbox.blockSignals(False)
+        checked = bool(checked)
+        if self._checked == checked:
+            return
+        self._checked = checked
+        self.viewport().update()
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._update_checkbox_geometry()
+    def isChecked(self) -> bool:
+        return self._checked
 
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        self._update_checkbox_geometry()
+    def paintSection(self, painter, rect: QRect, logical_index: int) -> None:
+        super().paintSection(painter, rect, logical_index)
+        if logical_index != self.checkbox_column or self.isSectionHidden(logical_index):
+            return
+        option = QStyleOptionButton()
+        option.state = QStyle.StateFlag.State_Enabled
+        if self._checked:
+            option.state |= QStyle.StateFlag.State_On
+        else:
+            option.state |= QStyle.StateFlag.State_Off
+        option.rect = self._checkbox_rect(rect)
+        style_widget = self._checkbox_style_widget()
+        painter.save()
+        style_widget.style().drawPrimitive(
+            QStyle.PrimitiveElement.PE_IndicatorCheckBox,
+            option,
+            painter,
+            style_widget,
+        )
+        painter.restore()
 
     def mousePressEvent(self, event) -> None:
         pos = event.position().toPoint()
         logical_index = self.logicalIndexAt(pos)
-        if (
-            logical_index == self.checkbox_column
-            and not self.checkbox.geometry().contains(pos)
-        ):
-            self.checkbox.toggle()
+        if logical_index == self.checkbox_column:
+            self._checked = not self._checked
+            self.viewport().update()
+            self.toggled.emit(self._checked)
             event.accept()
             return
         super().mousePressEvent(event)
 
-    def _update_checkbox_geometry(self) -> None:
-        if self.isSectionHidden(self.checkbox_column):
-            self.checkbox.hide()
-            return
-        section_x = self.sectionViewportPosition(self.checkbox_column)
-        section_width = self.sectionSize(self.checkbox_column)
-        checkbox_size = self.checkbox.sizeHint()
-        x = section_x + (section_width - checkbox_size.width()) // 2
-        y = (self.height() - checkbox_size.height()) // 2
-        self.checkbox.setGeometry(
-            x,
-            max(0, y),
-            checkbox_size.width(),
-            checkbox_size.height(),
+    def _checkbox_rect(self, section_rect: QRect) -> QRect:
+        style_widget = self._checkbox_style_widget()
+        indicator_width = style_widget.style().pixelMetric(
+            QStyle.PixelMetric.PM_IndicatorWidth, None, style_widget
         )
-        self.checkbox.show()
-        self.checkbox.raise_()
+        indicator_height = style_widget.style().pixelMetric(
+            QStyle.PixelMetric.PM_IndicatorHeight, None, style_widget
+        )
+        return QRect(
+            section_rect.x() + (section_rect.width() - indicator_width) // 2,
+            section_rect.y() + (section_rect.height() - indicator_height) // 2,
+            indicator_width,
+            indicator_height,
+        )
+
+    def _checkbox_style_widget(self) -> QWidget:
+        parent = self.parent()
+        return parent if isinstance(parent, QWidget) else self
+
+
+class ReportTreeWidget(QTreeWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._tree_column = 2
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        try:
+            painter.setPen(QPen(QColor(TABLE_GRID_COLOR)))
+            viewport_width = self.viewport().width()
+            first_visible = True
+            for item in self._visible_items():
+                rect = self.visualItemRect(item)
+                if not rect.isValid() or rect.bottom() < 0:
+                    continue
+                if rect.top() > self.viewport().height():
+                    break
+                if first_visible:
+                    painter.drawLine(0, rect.top(), viewport_width, rect.top())
+                    first_visible = False
+                painter.drawLine(0, rect.bottom(), viewport_width, rect.bottom())
+
+            painter.setPen(QPen(QColor("#334155")))
+            painter.setBrush(QColor("#334155"))
+            tree_x = self.header().sectionViewportPosition(self._tree_column)
+            arrow_x = tree_x + max(10, self.indentation() // 2)
+            for item in self._visible_items():
+                if item.childCount() <= 0:
+                    continue
+                rect = self.visualItemRect(item)
+                if not rect.isValid() or rect.bottom() < 0:
+                    continue
+                if rect.top() > self.viewport().height():
+                    break
+                center_y = rect.center().y()
+                if item.isExpanded():
+                    polygon = QPolygon(
+                        [
+                            QPoint(arrow_x - 5, center_y - 3),
+                            QPoint(arrow_x + 5, center_y - 3),
+                            QPoint(arrow_x, center_y + 4),
+                        ]
+                    )
+                else:
+                    polygon = QPolygon(
+                        [
+                            QPoint(arrow_x - 3, center_y - 5),
+                            QPoint(arrow_x - 3, center_y + 5),
+                            QPoint(arrow_x + 4, center_y),
+                        ]
+                    )
+                painter.drawPolygon(polygon)
+        finally:
+            painter.end()
+
+    def _visible_items(self) -> list[QTreeWidgetItem]:
+        items: list[QTreeWidgetItem] = []
+        for index in range(self.topLevelItemCount()):
+            parent_item = self.topLevelItem(index)
+            items.append(parent_item)
+            if not parent_item.isExpanded():
+                continue
+            for child_index in range(parent_item.childCount()):
+                items.append(parent_item.child(child_index))
+        return items
 
 
 class SidebarRestoreHandle(QPushButton):
@@ -1661,7 +1817,7 @@ def apply_column_widths(
     minimum_section_size: int = 46,
 ) -> None:
     stretch_columns = stretch_columns or set()
-    header = table.horizontalHeader()
+    header = table.horizontalHeader() if hasattr(table, "horizontalHeader") else table.header()
     header.setStretchLastSection(False)
     header.setMinimumSectionSize(minimum_section_size)
     for col in range(table.columnCount()):
@@ -1842,7 +1998,10 @@ class MainWindow(QMainWindow):
         self._loading_report = False
         self._report_details_dirty = False
         self._expanded_report_version_groups: set[int] = set()
+        self._expanded_report_list_version_groups: set[int] = set()
         self._syncing_defect_item_state = False
+        self._syncing_project_checks = False
+        self._syncing_business_checks = False
         self._syncing_report_output_checks = False
         self._database_error_reported = False
 
@@ -2654,7 +2813,97 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
+        table.setStyleSheet(
+            """
+            QTableWidget#entityTable {
+                background: #ffffff;
+                alternate-background-color: #f6f8fa;
+                border: 1px solid #d7dde8;
+                border-radius: 0;
+                gridline-color: #d7dde8;
+                outline: 0;
+            }
+            QTableWidget#entityTable::item {
+                border-right: 1px solid #d7dde8;
+                border-bottom: 1px solid #edf1f7;
+                padding: 6px;
+            }
+            QTableWidget#entityTable::item:selected {
+                background: #e8f1ff;
+                color: #111827;
+            }
+            QTableWidget#entityTable::indicator {
+                width: 15px;
+                height: 15px;
+            }
+            QTableWidget#entityTable::indicator:unchecked {
+                background: #ffffff;
+                border: 1px solid #64748b;
+            }
+            QTableWidget#entityTable::indicator:unchecked:hover {
+                background: #f8fafc;
+                border: 1px solid #2563eb;
+            }
+            """
+        )
         return table
+
+    def _build_entity_tree(
+        self,
+        headers: list[str],
+        column_widths: dict[int, int],
+        stretch_columns: set[int] | None = None,
+        *,
+        tree_column: int = 2,
+    ) -> ReportTreeWidget:
+        tree = ReportTreeWidget(self)
+        tree.setObjectName("reportTree")
+        tree.setColumnCount(len(headers))
+        tree.setHeaderLabels(headers)
+        apply_column_widths(tree, column_widths, stretch_columns)
+        tree.setColumnHidden(0, True)
+        tree.setRootIsDecorated(True)
+        tree.setTreePosition(tree_column)
+        tree.setIndentation(28)
+        tree.setUniformRowHeights(True)
+        tree.setAllColumnsShowFocus(True)
+        tree.setAlternatingRowColors(False)
+        tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        tree.setItemDelegateForColumn(1, CenteredCheckDelegate(tree))
+        tree.setStyleSheet(
+            """
+            QTreeWidget#reportTree {
+                background: #ffffff;
+                border: 1px solid #d7dde8;
+                gridline-color: #d7dde8;
+                outline: 0;
+            }
+            QTreeWidget#reportTree::item {
+                min-height: 32px;
+                border-bottom: 1px solid #edf1f7;
+            }
+            QTreeWidget#reportTree::item:selected {
+                background: #e8f1ff;
+                color: #111827;
+            }
+            QTreeWidget#reportTree::indicator {
+                width: 15px;
+                height: 15px;
+            }
+            QTreeWidget#reportTree::indicator:unchecked {
+                background: #ffffff;
+                border: 1px solid #64748b;
+            }
+            QTreeWidget#reportTree::indicator:unchecked:hover {
+                background: #f8fafc;
+                border: 1px solid #2563eb;
+            }
+            """
+        )
+        return tree
 
     def _build_content_card(self) -> tuple[QWidget, QVBoxLayout]:
         card = QWidget(self)
@@ -2736,20 +2985,34 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 self.project_count_label,
                 [
                     ("프로젝트 생성", self.create_project_from_right, "primaryButton"),
-                    ("선택 열기", self.open_selected_project_from_right, "secondaryButton"),
                     ("선택 복제", self.duplicate_selected_project_from_right, "secondaryButton"),
                     ("선택 수정", self.edit_selected_project_from_right, "secondaryButton"),
                     ("선택 삭제", self.delete_selected_project_from_right, "dangerButton"),
                 ],
             )
         )
-        self.project_table = self._build_entity_table(
-            ["ID", "프로젝트명", "생성일", "사업 수", "보고서 수"],
-            {0: 0, 2: 150, 3: 90, 4: 90},
-            {1},
+        project_column_widths = {0: 0, 1: 48, 3: 150, 4: 90, 5: 90}
+        self.project_table = self._build_entity_tree(
+            ["ID", "", "프로젝트명", "생성일", "사업 수", "보고서 수"],
+            project_column_widths,
+            {2},
+        )
+        self.project_select_header = CheckBoxHeader(1, self.project_table)
+        self.project_select_header.toggled.connect(
+            self._set_project_selection_checked
+        )
+        self.project_table.setHeader(self.project_select_header)
+        self.project_table.setColumnHidden(0, True)
+        apply_column_widths(self.project_table, project_column_widths, {2})
+        self.project_table.itemChanged.connect(
+            lambda item, column: self._handle_entity_check_item_changed(
+                self.project_table, item, column
+            )
         )
         self.project_table.itemDoubleClicked.connect(
-            lambda _item: self.open_selected_project_from_right()
+            lambda _item, column: self.open_selected_project_from_right()
+            if column != 1
+            else None
         )
         card_layout.addWidget(self.project_table)
         layout.addWidget(card)
@@ -2767,20 +3030,42 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 self.business_count_label,
                 [
                     ("사업 생성", self.create_business_from_right, "primaryButton"),
-                    ("선택 열기", self.open_selected_business_from_right, "secondaryButton"),
                     ("선택 복제", self.duplicate_selected_business_from_right, "secondaryButton"),
                     ("선택 수정", self.edit_selected_business_from_right, "secondaryButton"),
                     ("선택 삭제", self.delete_selected_business_from_right, "dangerButton"),
                 ],
             )
         )
-        self.business_table = self._build_entity_table(
-            ["ID", "사업코드", "사업명", "발주처", "시작일", "완료일", "보고서 수"],
-            {0: 0, 1: 90, 3: 130, 4: 120, 5: 120, 6: 90},
-            {2},
+        business_column_widths = {
+            0: 0,
+            1: 48,
+            2: 90,
+            4: 130,
+            5: 120,
+            6: 120,
+            7: 90,
+        }
+        self.business_table = self._build_entity_tree(
+            ["ID", "", "사업코드", "사업명", "발주처", "시작일", "완료일", "보고서 수"],
+            business_column_widths,
+            {3},
+        )
+        self.business_select_header = CheckBoxHeader(1, self.business_table)
+        self.business_select_header.toggled.connect(
+            self._set_business_selection_checked
+        )
+        self.business_table.setHeader(self.business_select_header)
+        self.business_table.setColumnHidden(0, True)
+        apply_column_widths(self.business_table, business_column_widths, {3})
+        self.business_table.itemChanged.connect(
+            lambda item, column: self._handle_entity_check_item_changed(
+                self.business_table, item, column
+            )
         )
         self.business_table.itemDoubleClicked.connect(
-            lambda _item: self.open_selected_business_from_right()
+            lambda _item, column: self.open_selected_business_from_right()
+            if column != 1
+            else None
         )
         card_layout.addWidget(self.business_table)
         layout.addWidget(card)
@@ -2811,9 +3096,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         action_row.addStretch(1)
         for text, callback, object_name in [
             ("보고서 추가", self.create_report_from_right, "primaryButton"),
-            ("선택 열기", self.open_selected_report_from_right, "secondaryButton"),
             ("선택 복제", self.duplicate_selected_report_from_right, "secondaryButton"),
-            ("선택 수정", self.edit_selected_report_from_right, "secondaryButton"),
             ("선택 삭제", self.delete_selected_report_from_right, "dangerButton"),
         ]:
             action_row.addWidget(self._make_action_button(text, callback, object_name))
@@ -2821,21 +3104,26 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         report_column_widths = {
             0: 0,
             1: 48,
-            2: 260,
-            3: 135,
-            4: 120,
-            5: 95,
-            6: 120,
-            7: 85,
-            8: 70,
-            9: 80,
+            2: 280,
+            3: 92,
+            4: 135,
+            5: 120,
+            6: 95,
+            7: 120,
+            8: 85,
+            9: 70,
             10: 80,
+            11: 80,
         }
-        self.report_table = self._build_entity_table(
+        self.report_table = ReportTreeWidget(self)
+        self.report_table.setObjectName("reportTree")
+        self.report_table.setColumnCount(len(report_column_widths))
+        self.report_table.setHeaderLabels(
             [
                 "ID",
                 "",
                 "보고서번호",
+                "버전",
                 "관로번호",
                 "조사일자",
                 "연장(m)",
@@ -2844,23 +3132,65 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 "영상",
                 "결함 수",
                 "버전 수",
-            ],
-            report_column_widths,
+            ]
         )
         self.report_output_header = CheckBoxHeader(1, self.report_table)
         self.report_output_header.toggled.connect(
             self._set_report_output_selection_checked
         )
-        self.report_table.setHorizontalHeader(self.report_output_header)
-        configure_table_headers(self.report_table)
+        self.report_table.setHeader(self.report_output_header)
         apply_column_widths(self.report_table, report_column_widths)
         self.report_table.setColumnHidden(0, True)
+        self.report_table.setRootIsDecorated(True)
+        self.report_table.setTreePosition(2)
+        self.report_table.setIndentation(28)
+        self.report_table.setUniformRowHeights(True)
+        self.report_table.setAllColumnsShowFocus(True)
+        self.report_table.setAlternatingRowColors(False)
+        self.report_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.report_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.report_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.report_table.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded
         )
+        self.report_table.setItemDelegateForColumn(
+            1, CenteredCheckDelegate(self.report_table)
+        )
+        self.report_table.setStyleSheet(
+            """
+            QTreeWidget#reportTree {
+                background: #ffffff;
+                border: 1px solid #d7dde8;
+                gridline-color: #d7dde8;
+                outline: 0;
+            }
+            QTreeWidget#reportTree::item {
+                min-height: 32px;
+                border-bottom: 1px solid #edf1f7;
+            }
+            QTreeWidget#reportTree::item:selected {
+                background: #e8f1ff;
+                color: #111827;
+            }
+            QTreeWidget#reportTree::indicator {
+                width: 15px;
+                height: 15px;
+            }
+            QTreeWidget#reportTree::indicator:unchecked {
+                background: #ffffff;
+                border: 1px solid #64748b;
+            }
+            QTreeWidget#reportTree::indicator:unchecked:hover {
+                background: #f8fafc;
+                border: 1px solid #2563eb;
+            }
+            """
+        )
         self.report_table.itemChanged.connect(self._sync_report_output_select_all_state)
+        self.report_table.itemExpanded.connect(self._handle_report_tree_item_expanded)
+        self.report_table.itemCollapsed.connect(self._handle_report_tree_item_collapsed)
         self.report_table.itemDoubleClicked.connect(
-            self._handle_report_table_double_clicked
+            self._handle_report_tree_item_double_clicked
         )
         card_layout.addWidget(self.report_table)
         layout.addWidget(card)
@@ -2934,7 +3264,9 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         layout.addWidget(self.report_zoom_in_button)
         layout.addStretch(1)
         self.report_export_button = QPushButton("보고서 출력")
-        self.report_export_button.clicked.connect(self.open_report_export_dialog)
+        self.report_export_button.clicked.connect(
+            lambda _checked=False: self.open_report_export_dialog()
+        )
         self.report_export_button.setObjectName("exportButton")
         layout.addWidget(self.report_export_button)
         self.report_controls.append(self.report_export_button)
@@ -4044,7 +4376,18 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 return items[0]
         return None
 
-    def _selected_table_id(self, table: QTableWidget) -> Optional[int]:
+    def _selected_table_id(self, table: QTableWidget | QTreeWidget) -> Optional[int]:
+        if isinstance(table, QTreeWidget):
+            item = table.currentItem()
+            if item is None:
+                return None
+            report_id = item.data(0, ROLE_ID)
+            if report_id is not None:
+                return int(report_id)
+            try:
+                return int(item.text(0))
+            except ValueError:
+                return None
         row = table.currentRow()
         if row < 0:
             return None
@@ -4056,84 +4399,273 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         except ValueError:
             return None
 
-    def _set_entity_table_row(
-        self, table: QTableWidget, row: int, entity_id: int, values: list[object]
-    ) -> None:
-        table.setItem(row, 0, read_only_table_item(entity_id, row_index=row))
-        for col, value in enumerate(values, start=1):
-            table.setItem(row, col, read_only_table_item(value, row_index=row))
-
-    def _set_report_table_row(
-        self, row: int, report_id: int, values: list[object]
-    ) -> None:
-        self.report_table.setItem(row, 0, read_only_table_item(report_id, row_index=row))
-        self.report_table.setItem(row, 1, read_only_table_item("", row_index=row))
-        self.report_table.setCellWidget(
-            row, 1, self._build_report_output_checkbox_widget(row)
+    def _selected_report_table_metadata(self) -> tuple[str | None, int | None]:
+        item = self.report_table.currentItem()
+        if item is None:
+            return None, None
+        nav_type = item.data(0, ROLE_NAV_TYPE)
+        version_group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+        return (
+            str(nav_type) if nav_type is not None else None,
+            int(version_group_id) if version_group_id is not None else None,
         )
-        for col, value in enumerate(values, start=2):
-            self.report_table.setItem(
-                row, col, read_only_table_item(value, row_index=row)
-            )
 
-    def _handle_report_table_double_clicked(self, item: QTableWidgetItem) -> None:
-        if item.column() == 1:
+    def _add_entity_tree_item(
+        self, tree: QTreeWidget, entity_id: int, values: list[object]
+    ) -> QTreeWidgetItem:
+        item = QTreeWidgetItem(
+            [
+                str(entity_id),
+                "",
+                *("" if value is None else str(value) for value in values),
+            ]
+        )
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(1, Qt.CheckState.Unchecked)
+        item.setData(0, ROLE_ID, entity_id)
+        for col in range(tree.columnCount()):
+            item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(col, QColor(TABLE_TEXT_COLOR))
+        tree.addTopLevelItem(item)
+        return item
+
+    def _handle_entity_check_item_changed(
+        self, tree: QTreeWidget, item: QTreeWidgetItem, column: int
+    ) -> None:
+        if column != 1:
+            return
+        self._sync_entity_select_all_state(tree)
+
+    def _iter_entity_tree_items(self, tree: QTreeWidget) -> list[QTreeWidgetItem]:
+        items: list[QTreeWidgetItem] = []
+        for index in range(tree.topLevelItemCount()):
+            parent_item = tree.topLevelItem(index)
+            items.append(parent_item)
+            for child_index in range(parent_item.childCount()):
+                items.append(parent_item.child(child_index))
+        return items
+
+    def _checked_table_ids(self, table: QTreeWidget) -> list[int]:
+        ids: list[int] = []
+        for item in self._iter_entity_tree_items(table):
+            if item.checkState(1) != Qt.CheckState.Checked:
+                continue
+            entity_id = item.data(0, ROLE_ID)
+            if entity_id is not None:
+                ids.append(int(entity_id))
+        return ids
+
+    def _set_project_selection_checked(self, checked: bool) -> None:
+        self._set_entity_selection_checked(
+            self.project_table,
+            self.project_select_header,
+            "_syncing_project_checks",
+            checked,
+        )
+
+    def _set_business_selection_checked(self, checked: bool) -> None:
+        self._set_entity_selection_checked(
+            self.business_table,
+            self.business_select_header,
+            "_syncing_business_checks",
+            checked,
+        )
+
+    def _set_entity_selection_checked(
+        self,
+        table: QTreeWidget,
+        header: CheckBoxHeader,
+        syncing_attr: str,
+        checked: bool,
+    ) -> None:
+        if getattr(self, syncing_attr):
+            return
+        setattr(self, syncing_attr, True)
+        try:
+            for item in self._iter_entity_tree_items(table):
+                item.setCheckState(
+                    1,
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
+                )
+        finally:
+            setattr(self, syncing_attr, False)
+        self._sync_entity_select_all_state(table)
+
+    def _sync_entity_select_all_state(self, table: QTreeWidget) -> None:
+        if table is self.project_table:
+            header = self.project_select_header
+            syncing_attr = "_syncing_project_checks"
+        elif table is self.business_table:
+            header = self.business_select_header
+            syncing_attr = "_syncing_business_checks"
+        else:
+            return
+        if getattr(self, syncing_attr):
+            return
+        setattr(self, syncing_attr, True)
+        try:
+            items = self._iter_entity_tree_items(table)
+            total = len(items)
+            checked = sum(
+                1 for item in items if item.checkState(1) == Qt.CheckState.Checked
+            )
+            header.setChecked(total > 0 and checked == total)
+        finally:
+            setattr(self, syncing_attr, False)
+
+    def _set_report_tree_item_metadata(
+        self,
+        item: QTreeWidgetItem,
+        *,
+        report_id: int,
+        nav_type: str,
+        version_group_id: int,
+        version_count: int,
+    ) -> None:
+        item.setData(0, ROLE_ID, report_id)
+        item.setData(0, ROLE_NAV_TYPE, nav_type)
+        item.setData(0, ROLE_VERSION_GROUP_ID, version_group_id)
+        item.setData(0, ROLE_VERSION_COUNT, version_count)
+
+    def _build_report_tree_item(
+        self,
+        report_id: int,
+        values: list[object],
+        *,
+        nav_type: str,
+        version_group_id: int,
+        version_count: int,
+        version_label: str,
+    ) -> QTreeWidgetItem:
+        is_version = nav_type == "report_version"
+        version_text = (
+            version_label
+            if is_version
+            else f"최신 {version_label}" if version_count > 1 else version_label
+        )
+        texts = [
+            str(report_id),
+            "",
+            str(values[0] or ""),
+            version_text,
+            *("" if value is None else str(value) for value in values[1:]),
+        ]
+        item = QTreeWidgetItem(texts)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(1, Qt.CheckState.Unchecked)
+        self._set_report_tree_item_metadata(
+            item,
+            report_id=report_id,
+            nav_type=nav_type,
+            version_group_id=version_group_id,
+            version_count=version_count,
+        )
+        for col in range(self.report_table.columnCount()):
+            item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(col, QColor(TABLE_TEXT_COLOR))
+            if is_version:
+                item.setBackground(col, QColor("#eef3fb"))
+                item.setForeground(col, QColor("#374151"))
+        return item
+
+    def _iter_report_tree_items(self) -> list[QTreeWidgetItem]:
+        items: list[QTreeWidgetItem] = []
+        for index in range(self.report_table.topLevelItemCount()):
+            parent_item = self.report_table.topLevelItem(index)
+            items.append(parent_item)
+            for child_index in range(parent_item.childCount()):
+                items.append(parent_item.child(child_index))
+        return items
+
+    def _handle_report_tree_item_double_clicked(
+        self, item: QTreeWidgetItem, column: int
+    ) -> None:
+        if column == 1:
             return
         self.open_selected_report_from_right()
 
-    def _build_report_output_checkbox_widget(self, row_index: int) -> QWidget:
-        wrapper = QWidget(self.report_table)
-        wrapper.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        row_color = TABLE_ROW_COLOR if row_index % 2 == 0 else TABLE_ALT_ROW_COLOR
-        wrapper.setStyleSheet(f"background-color: {row_color};")
-        layout = QHBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        checkbox = QCheckBox(wrapper)
-        checkbox.stateChanged.connect(
-            lambda _state: self._sync_report_output_select_all_state()
-        )
-        layout.addWidget(checkbox, alignment=Qt.AlignmentFlag.AlignCenter)
-        return wrapper
+    def _handle_report_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if item.data(0, ROLE_NAV_TYPE) != "report_group":
+            return
+        version_group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+        if version_group_id is not None:
+            self._expanded_report_list_version_groups.add(int(version_group_id))
 
-    def _report_output_checkbox_for_row(self, row: int) -> QCheckBox | None:
-        wrapper = self.report_table.cellWidget(row, 1)
-        if wrapper is None:
-            return None
-        return wrapper.findChild(QCheckBox)
+    def _handle_report_tree_item_collapsed(self, item: QTreeWidgetItem) -> None:
+        if item.data(0, ROLE_NAV_TYPE) != "report_group":
+            return
+        version_group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+        if version_group_id is not None:
+            self._expanded_report_list_version_groups.discard(int(version_group_id))
 
     def _set_report_output_selection_checked(self, checked: bool) -> None:
         if self._syncing_report_output_checks:
             return
         self._syncing_report_output_checks = True
         try:
-            for row in range(self.report_table.rowCount()):
-                checkbox = self._report_output_checkbox_for_row(row)
-                if checkbox is not None:
-                    checkbox.setChecked(checked)
+            for index in range(self.report_table.topLevelItemCount()):
+                parent_item = self.report_table.topLevelItem(index)
+                parent_item.setCheckState(
+                    1,
+                    Qt.CheckState.Checked
+                    if checked
+                    else Qt.CheckState.Unchecked,
+                )
+                for child_index in range(parent_item.childCount()):
+                    parent_item.child(child_index).setCheckState(
+                        1, Qt.CheckState.Unchecked
+                    )
         finally:
             self._syncing_report_output_checks = False
         self._sync_report_output_select_all_state()
 
-    def _sync_report_output_select_all_state(
-        self, item: QTableWidgetItem | None = None
+    def _handle_report_output_checkbox_changed(
+        self, item: QTreeWidgetItem, state: Qt.CheckState
     ) -> None:
         if self._syncing_report_output_checks:
             return
-        if item is not None and item.column() != 1:
+        if state != Qt.CheckState.Checked:
+            self._sync_report_output_select_all_state()
+            return
+        version_group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+        if version_group_id is not None:
+            self._syncing_report_output_checks = True
+            try:
+                for other_item in self._iter_report_tree_items():
+                    if other_item is item:
+                        continue
+                    if other_item.data(0, ROLE_VERSION_GROUP_ID) == version_group_id:
+                        other_item.setCheckState(1, Qt.CheckState.Unchecked)
+            finally:
+                self._syncing_report_output_checks = False
+        self._sync_report_output_select_all_state()
+
+    def _sync_report_output_select_all_state(
+        self,
+        item: QTreeWidgetItem | None = None,
+        column: int | None = None,
+    ) -> None:
+        if self._syncing_report_output_checks:
+            return
+        if column is not None and column != 1:
+            return
+        if item is not None:
+            self._handle_report_output_checkbox_changed(item, item.checkState(1))
             return
         self._syncing_report_output_checks = True
         try:
-            total = self.report_table.rowCount()
-            checked = sum(
-                1
-                for row in range(total)
-                if (
-                    (checkbox := self._report_output_checkbox_for_row(row)) is not None
-                    and checkbox.isChecked()
-                )
-            )
-            if checked == total and total > 0:
+            group_ids: set[int] = set()
+            checked_group_ids: set[int] = set()
+            for tree_item in self._iter_report_tree_items():
+                version_group_id = tree_item.data(0, ROLE_VERSION_GROUP_ID)
+                if version_group_id is None:
+                    continue
+                group_id = int(version_group_id)
+                if tree_item.data(0, ROLE_NAV_TYPE) == "report_group":
+                    group_ids.add(group_id)
+                if tree_item.checkState(1) == Qt.CheckState.Checked:
+                    checked_group_ids.add(group_id)
+            if group_ids and group_ids == checked_group_ids:
                 header_checked = True
             else:
                 header_checked = False
@@ -4142,31 +4674,195 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             self._syncing_report_output_checks = False
 
     def _checked_report_ids_from_right(self) -> list[int]:
-        report_ids: list[int] = []
-        for row in range(self.report_table.rowCount()):
-            checkbox = self._report_output_checkbox_for_row(row)
-            if checkbox is None or not checkbox.isChecked():
+        return [
+            report_id
+            for report_id, _nav_type, _version_group_id in (
+                self._checked_report_selections_from_right()
+            )
+        ]
+
+    def _checked_report_selections_from_right(
+        self,
+    ) -> list[tuple[int, str, int | None]]:
+        selections: list[tuple[int, str, int | None]] = []
+        for item in self._iter_report_tree_items():
+            if item.checkState(1) != Qt.CheckState.Checked:
                 continue
-            id_item = self.report_table.item(row, 0)
-            if id_item is None:
+            report_id = item.data(0, ROLE_ID)
+            nav_type = item.data(0, ROLE_NAV_TYPE)
+            version_group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+            if report_id is None or nav_type is None:
                 continue
-            try:
-                report_ids.append(int(id_item.text()))
-            except ValueError:
-                continue
-        return report_ids
+            selections.append(
+                (
+                    int(report_id),
+                    str(nav_type),
+                    int(version_group_id) if version_group_id is not None else None,
+                )
+            )
+        return selections
 
     def _resize_report_number_column_to_contents(self) -> None:
         column = 2
-        metrics = self.report_table.fontMetrics()
-        header_item = self.report_table.horizontalHeaderItem(column)
-        header_text = header_item.text() if header_item is not None else ""
-        width = metrics.horizontalAdvance(header_text) + 42
-        for row in range(self.report_table.rowCount()):
-            item = self.report_table.item(row, column)
-            if item is not None:
-                width = max(width, metrics.horizontalAdvance(item.text()) + 42)
-        self.report_table.setColumnWidth(column, max(260, width))
+        self.report_table.resizeColumnToContents(column)
+        self.report_table.setColumnWidth(
+            column, max(280, self.report_table.columnWidth(column))
+        )
+        self.report_table.resizeColumnToContents(3)
+        self.report_table.setColumnWidth(3, max(92, self.report_table.columnWidth(3)))
+
+    @staticmethod
+    def _report_version_label(report) -> str:
+        return report["version_name"] or f"v{report['version_number']}"
+
+    def _select_report_table_row(
+        self,
+        report_id: int | None,
+        *,
+        fallback_version_group_id: int | None = None,
+    ) -> None:
+        fallback_item: QTreeWidgetItem | None = None
+        for item in self._iter_report_tree_items():
+            item_report_id = item.data(0, ROLE_ID)
+            if report_id is not None and item_report_id is not None:
+                if int(item_report_id) == report_id:
+                    parent_item = item.parent()
+                    if parent_item is not None:
+                        parent_item.setExpanded(True)
+                    self.report_table.setCurrentItem(item)
+                    self.report_table.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.PositionAtCenter
+                    )
+                    return
+            group_id = item.data(0, ROLE_VERSION_GROUP_ID)
+            nav_type = item.data(0, ROLE_NAV_TYPE)
+            if (
+                fallback_item is None
+                and fallback_version_group_id is not None
+                and group_id is not None
+                and int(group_id) == fallback_version_group_id
+                and nav_type == "report_group"
+            ):
+                fallback_item = item
+        if fallback_item is not None:
+            self.report_table.setCurrentItem(fallback_item)
+            self.report_table.scrollToItem(fallback_item)
+
+    def _populate_report_table(
+        self,
+        business_id: int | None,
+        *,
+        selected_report_id: int | None = None,
+        fallback_version_group_id: int | None = None,
+        prechecked_report_ids: set[int] | None = None,
+    ) -> None:
+        if business_id is None:
+            self.report_table.clear()
+            self.report_count_label.setText("총 0건")
+            return
+        try:
+            rows = self.db.list_reports_with_counts(business_id)
+        except sqlite3.Error as exc:
+            self._handle_database_error(exc)
+            return
+        self.report_count_label.setText(f"총 {len(rows)}건")
+
+        self._syncing_report_output_checks = True
+        try:
+            self.report_table.clear()
+            self.report_table.setHeaderLabels(
+                [
+                    "ID",
+                    "",
+                    "보고서번호",
+                    "버전",
+                    "관로번호",
+                    "조사일자",
+                    "연장(m)",
+                    "총주행거리(m)",
+                    "완주여부",
+                    "영상",
+                    "결함 수",
+                    "버전 수",
+                ]
+            )
+            checked_ids = prechecked_report_ids or set()
+            for report in rows:
+                report_id = int(report["id"])
+                version_group_id = int(report["version_group_id"])
+                version_count = int(report["version_count"] or 0)
+                parent_item = self._build_report_tree_item(
+                    report_id,
+                    [
+                        report["report_number"],
+                        report["pipe_number"],
+                        report["survey_date"] or "",
+                        ""
+                        if report["length_m"] is None
+                        else f"{float(report['length_m']):.3f}",
+                        ""
+                        if report["total_drive_distance_m"] is None
+                        else f"{float(report['total_drive_distance_m']):.3f}",
+                        "완주" if report["is_completed"] else "미완주",
+                        "있음" if report["video_id"] is not None else "없음",
+                        report["defect_count"],
+                        version_count,
+                    ],
+                    nav_type="report_group",
+                    version_group_id=version_group_id,
+                    version_count=version_count,
+                    version_label=self._report_version_label(report),
+                )
+                self.report_table.addTopLevelItem(parent_item)
+                if report_id in checked_ids:
+                    parent_item.setCheckState(1, Qt.CheckState.Checked)
+                if version_count <= 1:
+                    continue
+                try:
+                    versions = self.db.list_report_versions(version_group_id)
+                except sqlite3.Error as exc:
+                    self._handle_database_error(exc)
+                    return
+                for version in versions:
+                    version_id = int(version["id"])
+                    if version_id == report_id:
+                        continue
+                    child_item = self._build_report_tree_item(
+                        version_id,
+                        [
+                            version["report_number"],
+                            version["pipe_number"],
+                            version["survey_date"] or "",
+                            ""
+                            if version["length_m"] is None
+                            else f"{float(version['length_m']):.3f}",
+                            ""
+                            if version["total_drive_distance_m"] is None
+                            else f"{float(version['total_drive_distance_m']):.3f}",
+                            "완주" if version["is_completed"] else "미완주",
+                            "있음" if version["video_id"] is not None else "없음",
+                            version["defect_count"],
+                            "",
+                        ],
+                        nav_type="report_version",
+                        version_group_id=version_group_id,
+                        version_count=version_count,
+                        version_label=self._report_version_label(version),
+                    )
+                    parent_item.addChild(child_item)
+                    if version_id in checked_ids:
+                        child_item.setCheckState(1, Qt.CheckState.Checked)
+                parent_item.setExpanded(
+                    version_group_id in self._expanded_report_list_version_groups
+                )
+        finally:
+            self._syncing_report_output_checks = False
+        self._resize_report_number_column_to_contents()
+        self._sync_report_output_select_all_state()
+        self._select_report_table_row(
+            selected_report_id,
+            fallback_version_group_id=fallback_version_group_id,
+        )
 
     def _show_project_list(self) -> None:
         self.current_project_id = None
@@ -4179,14 +4875,12 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             "프로젝트별 사업과 보고서를 관리합니다.",
             ["PIPE1", "프로젝트"],
         )
-        self.project_table.setRowCount(0)
+        self.project_table.clear()
         rows = self.db.list_projects_with_counts()
         self.project_count_label.setText(f"총 {len(rows)}건")
-        self.project_table.setRowCount(len(rows))
-        for idx, row in enumerate(rows):
-            self._set_entity_table_row(
+        for row in rows:
+            self._add_entity_tree_item(
                 self.project_table,
-                idx,
                 int(row["id"]),
                 [
                     row["project_name"],
@@ -4195,6 +4889,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                     row["report_count"],
                 ],
             )
+        self._sync_entity_select_all_state(self.project_table)
         self.right_stack.setCurrentWidget(self.project_list_page)
 
     def _show_business_list(self, project_id: int) -> None:
@@ -4214,11 +4909,10 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         )
         rows = self.db.list_businesses_with_counts(project_id)
         self.business_count_label.setText(f"총 {len(rows)}건")
-        self.business_table.setRowCount(len(rows))
-        for idx, row in enumerate(rows):
-            self._set_entity_table_row(
+        self.business_table.clear()
+        for row in rows:
+            self._add_entity_tree_item(
                 self.business_table,
-                idx,
                 int(row["id"]),
                 [
                     row["business_code"],
@@ -4229,6 +4923,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                     row["report_count"],
                 ],
             )
+        self._sync_entity_select_all_state(self.business_table)
         self.right_stack.setCurrentWidget(self.business_list_page)
 
     def _show_report_list(self, business_id: int) -> None:
@@ -4236,6 +4931,22 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         if business is None:
             self._show_project_list()
             return
+        previous_report_id = self.current_report_id
+        previous_version_group_id = self.current_version_group_id
+        selected_report_id: int | None = None
+        selected_version_group_id: int | None = None
+        if previous_report_id is not None:
+            context = self.db.get_report_context(previous_report_id)
+            if context is not None and int(context["business_id"]) == business_id:
+                selected_report_id = previous_report_id
+                selected_version_group_id = int(context["version_group_id"])
+                latest = self.db.get_latest_report_version(selected_version_group_id)
+                if latest is not None and int(latest["id"]) != previous_report_id:
+                    self._expanded_report_list_version_groups.add(
+                        selected_version_group_id
+                    )
+        elif previous_version_group_id is not None:
+            selected_version_group_id = previous_version_group_id
         self.current_project_id = int(business["project_id"])
         self.current_business_id = business_id
         self.current_report_id = None
@@ -4252,35 +4963,11 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 f"{business['business_code']} / {business['business_name']}",
             ],
         )
-        rows = self.db.list_reports_with_counts(business_id)
-        self.report_count_label.setText(f"총 {len(rows)}건")
-        self._syncing_report_output_checks = True
-        try:
-            self.report_table.setRowCount(len(rows))
-            for idx, row in enumerate(rows):
-                self._set_report_table_row(
-                    idx,
-                    int(row["id"]),
-                    [
-                        row["report_number"],
-                        row["pipe_number"],
-                        row["survey_date"] or "",
-                        ""
-                        if row["length_m"] is None
-                        else f"{float(row['length_m']):.3f}",
-                        ""
-                        if row["total_drive_distance_m"] is None
-                        else f"{float(row['total_drive_distance_m']):.3f}",
-                        "완주" if row["is_completed"] else "미완주",
-                        "있음" if row["video_id"] is not None else "없음",
-                        row["defect_count"],
-                        row["version_count"],
-                    ],
-                )
-        finally:
-            self._syncing_report_output_checks = False
-        self._resize_report_number_column_to_contents()
-        self._sync_report_output_select_all_state()
+        self._populate_report_table(
+            business_id,
+            selected_report_id=selected_report_id,
+            fallback_version_group_id=selected_version_group_id,
+        )
         self.right_stack.setCurrentWidget(self.report_list_page)
 
     def _current_navigation_selection(self) -> tuple[str, int] | tuple[None, None]:
@@ -4568,7 +5255,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             self._set_navigation_blocked(False)
 
     def _require_table_selection(
-        self, table: QTableWidget, label: str
+        self, table: QTableWidget | QTreeWidget, label: str
     ) -> Optional[int]:
         entity_id = self._selected_table_id(table)
         if entity_id is None:
@@ -4586,11 +5273,22 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("project", project_id)
 
     def duplicate_selected_project_from_right(self) -> None:
-        project_id = self._require_table_selection(self.project_table, "프로젝트")
-        if project_id is None:
+        project_ids = self._checked_table_ids(self.project_table)
+        if not project_ids:
+            QMessageBox.information(self, "선택 필요", "복제할 프로젝트를 체크하세요")
             return
-        new_project_id = self.db.duplicate_project(project_id)
-        self.refresh_tree("project", new_project_id)
+        if (
+            QMessageBox.question(
+                self,
+                "프로젝트 복제",
+                f"체크한 프로젝트 {len(project_ids)}건을 복제하시겠습니까?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        for project_id in project_ids:
+            self.db.duplicate_project(project_id)
+        self.refresh_tree()
 
     def duplicate_current_project_from_right(self) -> None:
         if self.current_project_id is None:
@@ -4621,12 +5319,24 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("project", project_id)
 
     def delete_selected_project_from_right(self) -> None:
-        project_id = self._require_table_selection(self.project_table, "프로젝트")
-        if project_id is None:
+        project_ids = self._checked_table_ids(self.project_table)
+        if not project_ids:
+            QMessageBox.information(self, "선택 필요", "삭제할 프로젝트를 체크하세요")
             return
-        if QMessageBox.question(self, "확인", "선택한 프로젝트와 작업 폴더를 삭제하시겠습니까?") != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "확인",
+                (
+                    "정말로 삭제하시겠습니까?\n"
+                    f"체크한 프로젝트 {len(project_ids)}건과 작업 폴더가 삭제됩니다."
+                ),
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
-        self.inspection.delete_project_with_artifacts(project_id)
+        for project_id in project_ids:
+            self.inspection.delete_project_with_artifacts(project_id)
         self.refresh_tree()
 
     def open_selected_project_from_right(self) -> None:
@@ -4659,13 +5369,26 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("business", business_id)
 
     def duplicate_selected_business_from_right(self) -> None:
-        business_id = self._require_table_selection(self.business_table, "사업")
-        if business_id is None:
+        business_ids = self._checked_table_ids(self.business_table)
+        if not business_ids:
+            QMessageBox.information(self, "선택 필요", "복제할 사업을 체크하세요")
             return
-        new_business_id = self.db.duplicate_business(
-            business_id, self.current_project_id
-        )
-        self.refresh_tree("business", new_business_id)
+        if (
+            QMessageBox.question(
+                self,
+                "사업 복제",
+                f"체크한 사업 {len(business_ids)}건을 복제하시겠습니까?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        project_id = self.current_project_id
+        for business_id in business_ids:
+            self.db.duplicate_business(business_id, project_id)
+        if project_id is not None:
+            self.refresh_tree("project", project_id)
+        else:
+            self.refresh_tree()
 
     def duplicate_current_business_from_right(self) -> None:
         if self.current_business_id is None:
@@ -4715,13 +5438,25 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("business", business_id)
 
     def delete_selected_business_from_right(self) -> None:
-        business_id = self._require_table_selection(self.business_table, "사업")
-        if business_id is None:
+        business_ids = self._checked_table_ids(self.business_table)
+        if not business_ids:
+            QMessageBox.information(self, "선택 필요", "삭제할 사업을 체크하세요")
             return
         project_id = self.current_project_id
-        if QMessageBox.question(self, "확인", "선택한 사업과 작업 폴더를 삭제하시겠습니까?") != QMessageBox.StandardButton.Yes:
+        if (
+            QMessageBox.question(
+                self,
+                "확인",
+                (
+                    "정말로 삭제하시겠습니까?\n"
+                    f"체크한 사업 {len(business_ids)}건과 작업 폴더가 삭제됩니다."
+                ),
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
-        self.inspection.delete_business_with_artifacts(business_id)
+        for business_id in business_ids:
+            self.inspection.delete_business_with_artifacts(business_id)
         if project_id is not None:
             self.refresh_tree("project", project_id)
         else:
@@ -4752,11 +5487,32 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("report", report_id)
 
     def duplicate_selected_report_from_right(self) -> None:
-        report_id = self._require_table_selection(self.report_table, "보고서")
-        if report_id is None:
+        selections = self._checked_report_selections_from_right()
+        if not selections:
+            QMessageBox.information(self, "선택 필요", "복제할 보고서를 체크하세요")
             return
-        new_report_id = self.db.duplicate_report(report_id, self.current_business_id)
-        self.refresh_tree("report", new_report_id)
+        if (
+            QMessageBox.question(
+                self,
+                "보고서 복제",
+                f"체크한 보고서 {len(selections)}건을 복제하시겠습니까?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        business_id = self.current_business_id
+        if business_id is None:
+            return
+        try:
+            for report_id, _nav_type, _version_group_id in selections:
+                self.db.duplicate_report(report_id, business_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "보고서 복제", str(exc))
+            return
+        if business_id is not None:
+            self.refresh_tree("business", business_id)
+        else:
+            self.refresh_tree()
 
     def duplicate_current_report_from_right(self) -> None:
         if self.current_report_id is None:
@@ -4800,13 +5556,46 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.refresh_tree("report", report_id)
 
     def delete_selected_report_from_right(self) -> None:
-        report_id = self._require_table_selection(self.report_table, "보고서")
-        if report_id is None:
+        selections = self._checked_report_selections_from_right()
+        if not selections:
+            QMessageBox.information(self, "선택 필요", "삭제할 보고서를 체크하세요")
             return
         business_id = self.current_business_id
-        if QMessageBox.question(self, "확인", "선택한 보고서와 작업 폴더를 삭제하시겠습니까?") != QMessageBox.StandardButton.Yes:
+        report_group_count = sum(
+            1 for _report_id, nav_type, _group_id in selections if nav_type == "report_group"
+        )
+        version_count = len(selections) - report_group_count
+        details: list[str] = []
+        if report_group_count:
+            details.append(f"보고서 전체 {report_group_count}건")
+        if version_count:
+            details.append(f"보고서 버전 {version_count}건")
+        target_text = ", ".join(details) if details else f"{len(selections)}건"
+        if (
+            QMessageBox.question(
+                self,
+                "보고서 삭제",
+                f"정말로 삭제하시겠습니까?\n체크한 {target_text}이 삭제됩니다.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
             return
-        self.inspection.delete_report_with_artifacts(report_id)
+        for report_id, nav_type, version_group_id in selections:
+            if nav_type == "report_version" and version_group_id is not None:
+                try:
+                    self.inspection.delete_report_version_with_artifacts(report_id)
+                except ValueError as exc:
+                    QMessageBox.warning(self, "버전 삭제", str(exc))
+                    return
+                self._expanded_report_list_version_groups.add(version_group_id)
+                continue
+            try:
+                self.inspection.delete_report_with_artifacts(report_id)
+            except ValueError as exc:
+                QMessageBox.warning(self, "보고서 삭제", str(exc))
+                return
+            if version_group_id is not None:
+                self._expanded_report_list_version_groups.discard(version_group_id)
         if business_id is not None:
             self.refresh_tree("business", business_id)
         else:
@@ -7004,6 +7793,8 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
     ) -> None:
         if self._warn_if_mandatory_update_required():
             return
+        if isinstance(report_id, bool):
+            report_id = None
         target_report_id = report_id if report_id is not None else self.current_report_id
         if target_report_id is None:
             return
@@ -7166,10 +7957,10 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 options.append(self._pdf_report_option_from_context(context))
         return options
 
-    def _excel_report_options_for_current_business(self) -> list[tuple[int, str]]:
+    def _excel_report_options_for_current_business(self) -> list[dict[str, object]]:
         if self.current_business_id is None:
             return []
-        options: list[tuple[int, str]] = []
+        options: list[dict[str, object]] = []
         rows = sorted(
             self.db.list_reports(self.current_business_id),
             key=lambda row: (
@@ -7179,12 +7970,33 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             ),
         )
         for row in rows:
-            version_name = row["version_name"] or f"v{row['version_number']}"
-            options.append(
-                (
-                    int(row["id"]),
-                    f"{row['report_number']} / {row['pipe_number']} > {version_name}",
+            report_id = int(row["id"])
+            version_group_id = int(row["version_group_id"])
+            version_name = self._report_version_label(row)
+            versions = []
+            for version in self.db.list_report_versions(version_group_id):
+                version_id = int(version["id"])
+                if version_id == report_id:
+                    continue
+                child_version_name = self._report_version_label(version)
+                updated_at = version["updated_at"] or "-"
+                versions.append(
+                    {
+                        "report_id": version_id,
+                        "label": f"{child_version_name} · 마지막 수정: {updated_at}",
+                    }
                 )
+            options.append(
+                {
+                    "report_id": report_id,
+                    "version_group_id": version_group_id,
+                    "version_name": version_name,
+                    "label": (
+                        f"{row['report_number']} / {row['pipe_number']}"
+                        f" > {version_name}"
+                    ),
+                    "versions": versions,
+                }
             )
         return options
 

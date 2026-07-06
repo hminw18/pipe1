@@ -240,6 +240,40 @@ def _style_range(
             _apply_table_cell_style(cell, fill=fill, bold=bold)
 
 
+def _merge_and_style_outer_border(
+    ws,
+    min_row: int,
+    max_row: int,
+    min_col: int,
+    max_col: int,
+    *,
+    fill=None,
+    bold: bool = False,
+) -> None:
+    ws.merge_cells(
+        start_row=min_row,
+        start_column=min_col,
+        end_row=max_row,
+        end_column=max_col,
+    )
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            cell = ws.cell(row, col)
+            cell.alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True
+            )
+            if fill is not None:
+                cell.fill = fill
+            if bold:
+                cell.font = Font(bold=True)
+            cell.border = Border(
+                left=THIN_SIDE if col == min_col else None,
+                right=THIN_SIDE if col == max_col else None,
+                top=THIN_SIDE if row == min_row else None,
+                bottom=THIN_SIDE if row == max_row else None,
+            )
+
+
 def _align_range(
     ws,
     min_row: int,
@@ -427,7 +461,7 @@ class ReportService:
             for col, value in enumerate(values, start=1):
                 _apply_table_cell_style(ws.cell(row_index, col, value))
             if include_photos:
-                _style_range(ws, row_index, row_index, 13, 22)
+                _merge_and_style_outer_border(ws, row_index, row_index, 13, 22)
                 image_path = Path(str(row_data.get("image_path") or ""))
                 if image_path.exists():
                     image = XLImage(str(image_path))
