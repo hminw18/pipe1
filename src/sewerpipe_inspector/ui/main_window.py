@@ -1804,9 +1804,11 @@ class MainWindow(QMainWindow):
         self.update_info: UpdateInfo | None = None
         self._update_install_in_progress = False
         self.logger = logging.getLogger(self.__class__.__name__)
+        app_settings = load_settings()
         self.report_view_scale = self._nearest_report_view_scale(
-            load_settings().report_view_scale
+            app_settings.report_view_scale
         )
+        self.developer_mode = app_settings.developer_mode
 
         self.current_project_id: Optional[int] = None
         self.current_business_id: Optional[int] = None
@@ -2256,8 +2258,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.detect_stop_button.setFixedHeight(28)
         self._register_report_scaled_widget(self.detect_stop_button, fixed_height=28)
         self.detect_stop_button.clicked.connect(self.detect_stop_segments)
-        self.show_stop_only_checkbox = QCheckBox("")
-        self.show_stop_only_checkbox.hide()
+        self.show_stop_only_checkbox = QCheckBox("의심구간만 보기")
         self.show_stop_only_checkbox.stateChanged.connect(self.refresh_defects)
         self.report_controls.extend(
             [
@@ -2488,10 +2489,18 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.stop_segment_header_layout.addStretch(1)
         self.stop_segment_header_layout.addWidget(self.detect_stop_button)
 
+        stop_only_row = QWidget(self)
+        stop_only_layout = QHBoxLayout(stop_only_row)
+        stop_only_layout.setContentsMargins(8, 0, 6, 0)
+        stop_only_layout.setSpacing(4)
+        stop_only_layout.addWidget(self.show_stop_only_checkbox)
+        stop_only_layout.addStretch(1)
+
         self.stop_segment_list = QListWidget(self)
         self.stop_segment_list.setObjectName("stopSegmentList")
         self.stop_segment_list.setWordWrap(True)
         self.stop_segment_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.stop_segment_list.installEventFilter(self)
         self.stop_segment_list.itemClicked.connect(self._seek_to_stop_segment_item)
         self.stop_segment_list.itemDoubleClicked.connect(self._seek_to_stop_segment_item)
         self.report_controls.append(self.stop_segment_list)
@@ -2499,17 +2508,25 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.stop_analysis_status_label = QLabel("", self)
         self.stop_analysis_status_label.setObjectName("stopAnalysisStatus")
         self.stop_analysis_status_label.setWordWrap(True)
+        self.stop_analysis_status_label.setFixedHeight(34)
+        self.stop_analysis_status_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.stop_analysis_status_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.stop_analysis_status_label.hide()
         self.stop_analysis_progress_bar = QProgressBar(self)
         self.stop_analysis_progress_bar.setRange(0, 100)
         self.stop_analysis_progress_bar.setTextVisible(True)
-        self.stop_analysis_progress_bar.setFixedHeight(14)
+        self.stop_analysis_progress_bar.setFixedHeight(16)
         self._register_report_scaled_widget(
-            self.stop_analysis_progress_bar, fixed_height=14
+            self.stop_analysis_progress_bar, fixed_height=16
         )
         self.stop_analysis_progress_bar.hide()
 
         layout.addWidget(self.stop_segment_header)
+        layout.addWidget(stop_only_row)
         layout.addWidget(self.stop_analysis_status_label)
         layout.addWidget(self.stop_analysis_progress_bar)
         layout.addWidget(self.stop_segment_list, 1)
@@ -3642,8 +3659,8 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             ("1", lambda: self.set_grade("소")),
             ("Return", self._save_defect_from_shortcut),
             ("Delete", self.delete_selected_defect),
-            (Qt.Key.Key_Left, lambda: self.step_frame(-1)),
-            (Qt.Key.Key_Right, lambda: self.step_frame(1)),
+            (Qt.Key.Key_Left, lambda: self._handle_plain_arrow_shortcut(-1)),
+            (Qt.Key.Key_Right, lambda: self._handle_plain_arrow_shortcut(1)),
             (QKeySequence(Qt.KeyboardModifier.ShiftModifier | Qt.Key.Key_Left), lambda: self.jump_seconds(-5)),
             (QKeySequence(Qt.KeyboardModifier.ShiftModifier | Qt.Key.Key_Right), lambda: self.jump_seconds(5)),
         ]
@@ -3672,6 +3689,12 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             return
         self.save_defect()
 
+    def _handle_plain_arrow_shortcut(self, direction: int) -> None:
+        if self._should_navigate_stop_candidates():
+            self._step_stop_candidate(direction)
+            return
+        self.step_frame(direction)
+
     def _is_report_detail_page_active(self) -> bool:
         if not hasattr(self, "right_stack") or not hasattr(self, "report_detail_page"):
             return False
@@ -3697,6 +3720,8 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         if self._handle_combo_popup_key(obj, event):
             return True
         if self._handle_defect_enter_key(obj, event):
+            return True
+        if self._handle_stop_candidate_key(obj, event):
             return True
         if self._handle_video_key(obj, event):
             return True
@@ -3765,6 +3790,23 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.save_defect()
         return True
 
+    def _handle_stop_candidate_key(self, obj, event) -> bool:
+        if not hasattr(self, "stop_segment_list") or obj != self.stop_segment_list:
+            return False
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        if event.key() not in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            return False
+        if event.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
+        if not self._should_navigate_stop_candidates():
+            return False
+        if event.isAutoRepeat():
+            return True
+        direction = -1 if event.key() == Qt.Key.Key_Left else 1
+        self._step_stop_candidate(direction)
+        return True
+
     def _handle_video_drop_event(self, event) -> bool:
         if event.type() in (
             QEvent.Type.DragEnter,
@@ -3792,7 +3834,12 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             return True
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             direction = -1 if key == Qt.Key.Key_Left else 1
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            if (
+                event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and self._should_navigate_stop_candidates()
+            ):
+                self._step_stop_candidate(direction)
+            elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.jump_seconds(direction * 5)
             else:
                 self.step_frame(direction)
@@ -4835,6 +4882,11 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
             if app is not None:
                 app.quit()
             return
+        settings = load_settings()
+        developer_mode_changed = self.developer_mode != settings.developer_mode
+        self.developer_mode = settings.developer_mode
+        if developer_mode_changed:
+            self._refresh_stop_segment_list()
         message = "설정이 저장되었습니다."
         if dialog.training_upload_consent_changed:
             message = "설정이 저장되었습니다. 학습 데이터 업로드 동의가 변경되었습니다."
@@ -6232,6 +6284,74 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self.stop_segments = []
         self._refresh_stop_segment_list()
 
+    def _should_navigate_stop_candidates(self) -> bool:
+        return (
+            self._is_report_detail_page_active()
+            and hasattr(self, "show_stop_only_checkbox")
+            and self.show_stop_only_checkbox.isChecked()
+        )
+
+    def _stop_candidate_items(self) -> list[tuple[int, QListWidgetItem]]:
+        if not hasattr(self, "stop_segment_list"):
+            return []
+        items: list[tuple[int, QListWidgetItem]] = []
+        for row in range(self.stop_segment_list.count()):
+            item = self.stop_segment_list.item(row)
+            if item.data(ROLE_STOP_ITEM_TYPE) != "candidate":
+                continue
+            timestamp_ms = item.data(ROLE_STOP_TIMESTAMP_MS)
+            if timestamp_ms is None:
+                continue
+            try:
+                items.append((int(timestamp_ms), item))
+            except (TypeError, ValueError):
+                continue
+        return items
+
+    def _step_stop_candidate(self, direction: int) -> bool:
+        candidates = self._stop_candidate_items()
+        if not candidates:
+            return False
+
+        current_item = self.stop_segment_list.currentItem()
+        current_index = next(
+            (
+                idx
+                for idx, (_timestamp_ms, item) in enumerate(candidates)
+                if item is current_item
+            ),
+            None,
+        )
+        if current_index is None:
+            current_ms = self.timeline_slider.value()
+            if direction > 0:
+                current_index = next(
+                    (
+                        idx
+                        for idx, (timestamp_ms, _item) in enumerate(candidates)
+                        if timestamp_ms > current_ms
+                    ),
+                    len(candidates) - 1,
+                )
+            else:
+                current_index = next(
+                    (
+                        idx
+                        for idx in range(len(candidates) - 1, -1, -1)
+                        if candidates[idx][0] < current_ms
+                    ),
+                    0,
+                )
+        else:
+            current_index = max(
+                0, min(len(candidates) - 1, current_index + direction)
+            )
+
+        timestamp_ms, item = candidates[current_index]
+        self.stop_segment_list.setCurrentItem(item)
+        self._preview_stop_frame_candidate(timestamp_ms)
+        return True
+
     def _refresh_stop_segment_list(self) -> None:
         if not hasattr(self, "stop_segment_list"):
             return
@@ -6261,16 +6381,20 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
                 timestamp = float(candidate.get("timestamp", 0.0))
                 timestamp_ms = int(float(candidate.get("timestamp_ms", timestamp * 1000)))
                 candidate_item = QListWidgetItem(
-                    self._stop_candidate_debug_summary(
+                    self._stop_candidate_summary(
                         candidate_idx,
                         timestamp_ms,
                         candidate,
                     )
                 )
                 candidate_item.setToolTip(
-                    self._stop_candidate_debug_tooltip(candidate_idx, timestamp_ms, candidate)
+                    self._stop_candidate_tooltip(
+                        candidate_idx, timestamp_ms, candidate
+                    )
                 )
-                candidate_item.setSizeHint(QSize(0, 74))
+                candidate_item.setSizeHint(
+                    QSize(0, 74 if self.developer_mode else 40)
+                )
                 candidate_item.setData(ROLE_STOP_ITEM_TYPE, "candidate")
                 candidate_item.setData(ROLE_STOP_TIMESTAMP_MS, timestamp_ms)
                 self.stop_segment_list.addItem(candidate_item)
@@ -6303,6 +6427,41 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         if error:
             lines.extend(["", f"후보 분석 오류: {error}"])
         return "\n".join(lines)
+
+    def _stop_candidate_summary(
+        self,
+        candidate_idx: int,
+        timestamp_ms: int,
+        candidate: dict[str, object],
+    ) -> str:
+        if self.developer_mode:
+            return self._stop_candidate_debug_summary(
+                candidate_idx, timestamp_ms, candidate
+            )
+        confidence = self._stop_candidate_value(candidate, "confidence")
+        return (
+            f"   후보 {candidate_idx}  {format_short_timestamp(timestamp_ms)}"
+            f" · 확률 {confidence * 100:.0f}%"
+        )
+
+    def _stop_candidate_tooltip(
+        self,
+        candidate_idx: int,
+        timestamp_ms: int,
+        candidate: dict[str, object],
+    ) -> str:
+        if self.developer_mode:
+            return self._stop_candidate_debug_tooltip(
+                candidate_idx, timestamp_ms, candidate
+            )
+        confidence = self._stop_candidate_value(candidate, "confidence")
+        return "\n".join(
+            [
+                f"후보 {candidate_idx}",
+                f"시간: {format_short_timestamp(timestamp_ms)}",
+                f"확률: {confidence * 100:.0f}%",
+            ]
+        )
 
     def _stop_candidate_debug_summary(
         self,

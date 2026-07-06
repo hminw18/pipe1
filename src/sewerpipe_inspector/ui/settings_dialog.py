@@ -161,6 +161,12 @@ class SettingsDialog(QDialog):
             self.settings.always_show_directory_picker
         )
         row = _add_settings_row(grid, row, "", self.always_pick_workspace_checkbox)
+
+        self.developer_mode_checkbox = QCheckBox(
+            "개발자 모드 사용", tab
+        )
+        self.developer_mode_checkbox.setChecked(self.settings.developer_mode)
+        row = _add_settings_row(grid, row, "개발자 모드", self.developer_mode_checkbox)
         layout.addLayout(grid)
 
         note = QLabel(
@@ -384,6 +390,7 @@ class SettingsDialog(QDialog):
         self.settings.suppress_default_workspace_prompt = bool(
             normalized_workspace or self.settings.always_show_directory_picker
         )
+        self.settings.developer_mode = self.developer_mode_checkbox.isChecked()
         save_settings(self.settings)
         return True
 
