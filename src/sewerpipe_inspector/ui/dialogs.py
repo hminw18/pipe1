@@ -13,14 +13,18 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+
+REPORT_OPTION_ID_ROLE = Qt.ItemDataRole.UserRole
+REPORT_OPTION_NODE_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 @dataclass
@@ -291,29 +295,48 @@ class ReportExportDialog(QDialog):
         excel_layout.addWidget(self.excel_filename_label)
         self.excel_select_all_checkbox = QCheckBox("현재 사업 보고서 전체 선택", excel_tab)
         self.excel_select_all_checkbox.setTristate(False)
-        self.excel_report_list = QListWidget(excel_tab)
-        self.excel_report_list.setMinimumHeight(92)
-        self.excel_report_list.setMaximumHeight(120)
+        self.excel_report_tree = QTreeWidget(excel_tab)
+        self.excel_report_tree.setObjectName("excelReportTree")
+        self.excel_report_tree.setHeaderHidden(True)
+        self.excel_report_tree.setRootIsDecorated(True)
+        self.excel_report_tree.setUniformRowHeights(True)
+        self.excel_report_tree.setMinimumHeight(110)
+        self.excel_report_tree.setMaximumHeight(160)
+        self.excel_report_tree.setStyleSheet(
+            """
+            QTreeWidget#excelReportTree {
+                background: #ffffff;
+                border: 1px solid #d7dde8;
+                outline: 0;
+            }
+            QTreeWidget#excelReportTree::item {
+                min-height: 24px;
+            }
+            QTreeWidget#excelReportTree::indicator {
+                width: 15px;
+                height: 15px;
+            }
+            QTreeWidget#excelReportTree::indicator:unchecked {
+                background: #ffffff;
+                border: 1px solid #64748b;
+            }
+            QTreeWidget#excelReportTree::indicator:unchecked:hover {
+                background: #f8fafc;
+                border: 1px solid #2563eb;
+            }
+            """
+        )
         explicit_preselection = preselected_excel_report_ids is not None
         preselected_ids = set(preselected_excel_report_ids or [])
-        for report_id, label in excel_report_options or report_options:
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, report_id)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            if explicit_preselection:
-                checked = int(report_id) in preselected_ids
-            else:
-                checked = int(report_id) == current_report_id
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-            self.excel_report_list.addItem(item)
-        if not explicit_preselection and self.excel_report_list.count() > 1:
-            self.excel_select_all_checkbox.setCheckState(Qt.CheckState.Checked)
-            for row in range(self.excel_report_list.count()):
-                self.excel_report_list.item(row).setCheckState(Qt.CheckState.Checked)
-        else:
-            self._set_excel_select_all_state_from_items()
+        self._populate_excel_report_tree(
+            excel_report_options or report_options,
+            current_report_id,
+            preselected_ids,
+            explicit_preselection,
+        )
+        self._set_excel_select_all_state_from_items()
         excel_layout.addWidget(self.excel_select_all_checkbox)
-        excel_layout.addWidget(self.excel_report_list)
+        excel_layout.addWidget(self.excel_report_tree)
         excel_layout.addStretch(1)
         excel_layout.addLayout(self._build_output_dir_row(excel_tab, default_output_dir))
         self.tabs.addTab(excel_tab, "엑셀 보고서 출력")
@@ -356,7 +379,7 @@ class ReportExportDialog(QDialog):
         self.pdf_type_combo.currentIndexChanged.connect(self._update_pdf_report_controls)
         self.excel_type_combo.currentIndexChanged.connect(self._update_excel_report_controls)
         self.excel_select_all_checkbox.stateChanged.connect(self._toggle_excel_report_selection)
-        self.excel_report_list.itemChanged.connect(self._sync_excel_select_all_state)
+        self.excel_report_tree.itemChanged.connect(self._sync_excel_select_all_state)
         self._update_excel_report_controls()
         self._update_pdf_report_controls()
 
@@ -368,6 +391,102 @@ class ReportExportDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    @staticmethod
+    def _normalise_excel_report_options(options) -> list[dict[str, object]]:
+        groups: list[dict[str, object]] = []
+        for option in options:
+            if isinstance(option, dict):
+                groups.append(
+                    {
+                        "report_id": int(option["report_id"]),
+                        "label": str(option["label"]),
+                        "versions": list(option.get("versions") or []),
+                    }
+                )
+                continue
+            report_id, label = option
+            groups.append(
+                {
+                    "report_id": int(report_id),
+                    "label": str(label),
+                    "versions": [],
+                }
+            )
+        return groups
+
+    def _populate_excel_report_tree(
+        self,
+        options,
+        current_report_id: int,
+        preselected_ids: set[int],
+        explicit_preselection: bool,
+    ) -> None:
+        self._syncing_excel_report_checks = True
+        try:
+            self.excel_report_tree.clear()
+            for group in self._normalise_excel_report_options(options):
+                report_id = int(group["report_id"])
+                versions = [
+                    {
+                        "report_id": int(version["report_id"]),
+                        "label": str(version["label"]),
+                    }
+                    for version in group["versions"]
+                ]
+                checked_child_id: int | None = None
+                if explicit_preselection:
+                    group_checked = report_id in preselected_ids
+                    for version in versions:
+                        if int(version["report_id"]) in preselected_ids:
+                            checked_child_id = int(version["report_id"])
+                            group_checked = False
+                            break
+                else:
+                    checked_child_id = next(
+                        (
+                            int(version["report_id"])
+                            for version in versions
+                            if int(version["report_id"]) == current_report_id
+                        ),
+                        None,
+                    )
+                    group_checked = checked_child_id is None
+
+                parent_item = QTreeWidgetItem([str(group["label"])])
+                parent_item.setData(0, REPORT_OPTION_ID_ROLE, report_id)
+                parent_item.setData(0, REPORT_OPTION_NODE_ROLE, "group")
+                parent_item.setFlags(
+                    parent_item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                parent_item.setCheckState(
+                    0,
+                    Qt.CheckState.Checked
+                    if group_checked
+                    else Qt.CheckState.Unchecked,
+                )
+                self.excel_report_tree.addTopLevelItem(parent_item)
+
+                for version in versions:
+                    child_item = QTreeWidgetItem([str(version["label"])])
+                    child_item.setData(
+                        0, REPORT_OPTION_ID_ROLE, int(version["report_id"])
+                    )
+                    child_item.setData(0, REPORT_OPTION_NODE_ROLE, "version")
+                    child_item.setFlags(
+                        child_item.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    child_item.setCheckState(
+                        0,
+                        Qt.CheckState.Checked
+                        if checked_child_id == int(version["report_id"])
+                        else Qt.CheckState.Unchecked,
+                    )
+                    parent_item.addChild(child_item)
+                parent_item.setExpanded(checked_child_id is not None)
+            self.excel_report_tree.resizeColumnToContents(0)
+        finally:
+            self._syncing_excel_report_checks = False
 
     def _configure_export_combo(
         self, combo: QComboBox, *, minimum_width: int
@@ -411,7 +530,7 @@ class ReportExportDialog(QDialog):
 
     def _update_excel_report_controls(self) -> None:
         self.excel_select_all_checkbox.setVisible(True)
-        self.excel_report_list.setVisible(True)
+        self.excel_report_tree.setVisible(True)
         show_photos_option = self.excel_report_type() == "internal_defect"
         self.include_internal_photos_row.setVisible(show_photos_option)
         self.include_internal_photos_checkbox.setVisible(show_photos_option)
@@ -424,28 +543,62 @@ class ReportExportDialog(QDialog):
         self._syncing_excel_report_checks = True
         try:
             checked = Qt.CheckState(state) == Qt.CheckState.Checked
-            for row in range(self.excel_report_list.count()):
-                self.excel_report_list.item(row).setCheckState(
-                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            for index in range(self.excel_report_tree.topLevelItemCount()):
+                parent_item = self.excel_report_tree.topLevelItem(index)
+                parent_item.setCheckState(
+                    0,
+                    Qt.CheckState.Checked
+                    if checked
+                    else Qt.CheckState.Unchecked,
                 )
+                for child_index in range(parent_item.childCount()):
+                    parent_item.child(child_index).setCheckState(
+                        0, Qt.CheckState.Unchecked
+                    )
         finally:
             self._syncing_excel_report_checks = False
 
-    def _sync_excel_select_all_state(self, _item: QListWidgetItem) -> None:
+    def _sync_excel_select_all_state(
+        self, item: QTreeWidgetItem | None = None, _column: int = 0
+    ) -> None:
         if self._syncing_excel_report_checks:
             return
+        if item is not None and item.checkState(0) == Qt.CheckState.Checked:
+            self._syncing_excel_report_checks = True
+            try:
+                parent_item = item.parent()
+                if parent_item is None:
+                    for child_index in range(item.childCount()):
+                        item.child(child_index).setCheckState(
+                            0, Qt.CheckState.Unchecked
+                        )
+                else:
+                    parent_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    for child_index in range(parent_item.childCount()):
+                        sibling = parent_item.child(child_index)
+                        if sibling is not item:
+                            sibling.setCheckState(0, Qt.CheckState.Unchecked)
+            finally:
+                self._syncing_excel_report_checks = False
         self._set_excel_select_all_state_from_items()
 
     def _set_excel_select_all_state_from_items(self) -> None:
         self._syncing_excel_report_checks = True
         try:
-            total = self.excel_report_list.count()
-            checked = sum(
-                1
-                for row in range(total)
-                if self.excel_report_list.item(row).checkState() == Qt.CheckState.Checked
-            )
-            if checked == total and total > 0:
+            total = self.excel_report_tree.topLevelItemCount()
+            selected_groups = 0
+            for index in range(total):
+                parent_item = self.excel_report_tree.topLevelItem(index)
+                if parent_item.checkState(0) == Qt.CheckState.Checked:
+                    selected_groups += 1
+                    continue
+                if any(
+                    parent_item.child(child_index).checkState(0)
+                    == Qt.CheckState.Checked
+                    for child_index in range(parent_item.childCount())
+                ):
+                    selected_groups += 1
+            if selected_groups == total and total > 0:
                 state = Qt.CheckState.Checked
             else:
                 state = Qt.CheckState.Unchecked
@@ -527,10 +680,14 @@ class ReportExportDialog(QDialog):
 
     def selected_excel_report_ids(self) -> list[int]:
         ids: list[int] = []
-        for row in range(self.excel_report_list.count()):
-            item = self.excel_report_list.item(row)
-            if item.checkState() == Qt.CheckState.Checked:
-                ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
+        for index in range(self.excel_report_tree.topLevelItemCount()):
+            parent_item = self.excel_report_tree.topLevelItem(index)
+            if parent_item.checkState(0) == Qt.CheckState.Checked:
+                ids.append(int(parent_item.data(0, REPORT_OPTION_ID_ROLE)))
+            for child_index in range(parent_item.childCount()):
+                child_item = parent_item.child(child_index)
+                if child_item.checkState(0) == Qt.CheckState.Checked:
+                    ids.append(int(child_item.data(0, REPORT_OPTION_ID_ROLE)))
         return ids
 
     def include_internal_defect_photos(self) -> bool:
