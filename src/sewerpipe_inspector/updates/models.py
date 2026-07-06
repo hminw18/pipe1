@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -34,12 +35,24 @@ class UpdateInfo:
     def require_download_metadata(self) -> None:
         if not self.update_available:
             return
+        if not self.latest_version:
+            raise ValueError("Update response is missing latest_version.")
         if not self.download_url or not self.sha256:
-            raise ValueError("업데이트 다운로드 정보가 올바르지 않습니다.")
+            raise ValueError("Update response is missing download metadata.")
+        if self.size_bytes is None or self.size_bytes <= 0:
+            raise ValueError("Update response has an invalid size_bytes value.")
         if len(self.sha256) != 64 or any(
             char not in "0123456789abcdef" for char in self.sha256
         ):
-            raise ValueError("업데이트 해시 형식이 올바르지 않습니다.")
+            raise ValueError("Update response has an invalid sha256 value.")
+
+    def require_newer_than(self, current_version: str) -> None:
+        if not self.update_available:
+            return
+        self.require_download_metadata()
+        assert self.latest_version is not None
+        if compare_versions(self.latest_version, current_version) <= 0:
+            raise ValueError("Update response does not contain a newer version.")
 
 
 def _optional_string(value: object) -> str | None:
@@ -57,3 +70,24 @@ def _optional_int(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None
+
+
+def compare_versions(left: str, right: str) -> int:
+    left_parts = _version_parts(left)
+    right_parts = _version_parts(right)
+    width = max(len(left_parts), len(right_parts))
+    left_parts += (0,) * (width - len(left_parts))
+    right_parts += (0,) * (width - len(right_parts))
+    if left_parts > right_parts:
+        return 1
+    if left_parts < right_parts:
+        return -1
+    return 0
+
+
+def _version_parts(value: str) -> tuple[int, ...]:
+    core = value.split("+", 1)[0].split("-", 1)[0]
+    parts = tuple(int(part) for part in re.findall(r"\d+", core))
+    if not parts:
+        raise ValueError(f"Invalid version: {value}")
+    return parts

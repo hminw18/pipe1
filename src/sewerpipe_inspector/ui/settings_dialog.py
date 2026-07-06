@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QThread, Qt
 from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from sewerpipe_inspector.settings_service import load_settings, save_settings
+from sewerpipe_inspector.ui.update_install_worker import UpdateInstallWorker
 
 if TYPE_CHECKING:
     from sewerpipe_inspector.db import Database
@@ -58,6 +59,7 @@ class SettingsDialog(QDialog):
         self.training_upload_service = training_upload_service
         self.update_service = update_service
         self.update_info = update_info
+        self._update_install_in_progress = False
         self.reset_license_callback = reset_license_callback
         self.settings = load_settings()
         self.training_upload_consent_changed = False
@@ -458,6 +460,56 @@ class SettingsDialog(QDialog):
             self._refresh_update_ui()
             self._set_update_buttons_enabled(True)
 
+    def _start_update_install_worker(self) -> bool:
+        if self.update_service is None or self.update_info is None:
+            return True
+        if self._update_install_in_progress:
+            return True
+        self._update_install_in_progress = True
+        self._set_update_buttons_enabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        thread = QThread(self)
+        worker = UpdateInstallWorker(self.update_service, self.update_info)
+        worker.moveToThread(thread)
+        active_threads = getattr(self, "_update_install_threads", [])
+        active_threads.append((thread, worker))
+        setattr(self, "_update_install_threads", active_threads)
+
+        def cleanup() -> None:
+            active = getattr(self, "_update_install_threads", [])
+            try:
+                active.remove((thread, worker))
+            except ValueError:
+                pass
+            setattr(self, "_update_install_threads", active)
+
+        def on_succeeded(_msi_path: str) -> None:
+            QApplication.restoreOverrideCursor()
+            super(SettingsDialog, self).accept()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+
+        def on_failed(message: str) -> None:
+            QApplication.restoreOverrideCursor()
+            self._update_install_in_progress = False
+            self._set_update_buttons_enabled(True)
+            QMessageBox.warning(
+                self,
+                "업데이트",
+                f"업데이트 설치를 시작할 수 없습니다.\n\n{message}",
+            )
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(on_succeeded)
+        worker.failed.connect(on_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(cleanup)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
     def _download_and_install_update(self) -> None:
         if self.update_service is None or self.update_info is None:
             return
@@ -474,6 +526,8 @@ class SettingsDialog(QDialog):
             QMessageBox.StandardButton.Yes,
         )
         if result != QMessageBox.StandardButton.Yes:
+            return
+        if self._start_update_install_worker():
             return
         self._set_update_buttons_enabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)

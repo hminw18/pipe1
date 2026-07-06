@@ -105,6 +105,7 @@ from sewerpipe_inspector.ui.dialogs import (
     ReportExportDialog,
 )
 from sewerpipe_inspector.ui.settings_dialog import SettingsDialog
+from sewerpipe_inspector.ui.update_install_worker import UpdateInstallWorker
 from sewerpipe_inspector.ui.widgets import TimelineSlider
 
 if TYPE_CHECKING:
@@ -1667,6 +1668,7 @@ class MainWindow(QMainWindow):
         self.license_config = license_config
         self.update_service = update_service
         self.update_info: UpdateInfo | None = None
+        self._update_install_in_progress = False
         self.logger = logging.getLogger(self.__class__.__name__)
 
         self.current_project_id: Optional[int] = None
@@ -4295,8 +4297,64 @@ class MainWindow(QMainWindow):
                 "업데이트 설치 전까지 보고서 생성과 학습 업로드 기능이 제한됩니다.",
             )
 
+    def _start_update_install_worker(self, info: UpdateInfo) -> bool:
+        if self.update_service is None:
+            return True
+        if self._update_install_in_progress:
+            return True
+        self._update_install_in_progress = True
+        self.statusBar().showMessage("업데이트 다운로드 및 검증 중입니다...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        thread = QThread(self)
+        worker = UpdateInstallWorker(self.update_service, info)
+        worker.moveToThread(thread)
+        active_threads = getattr(self, "_update_install_threads", [])
+        active_threads.append((thread, worker))
+        setattr(self, "_update_install_threads", active_threads)
+
+        def cleanup() -> None:
+            active = getattr(self, "_update_install_threads", [])
+            try:
+                active.remove((thread, worker))
+            except ValueError:
+                pass
+            setattr(self, "_update_install_threads", active)
+
+        def on_succeeded(msi_path: str) -> None:
+            QApplication.restoreOverrideCursor()
+            if self.update_service is not None:
+                log_path = self.update_service.installer_log_path(Path(msi_path))
+                self.logger.info("Update installer helper started. Log: %s", log_path)
+            self.setEnabled(False)
+            self.close()
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+
+        def on_failed(message: str) -> None:
+            QApplication.restoreOverrideCursor()
+            self._update_install_in_progress = False
+            self.statusBar().clearMessage()
+            QMessageBox.warning(
+                self,
+                "업데이트",
+                f"업데이트 설치를 시작할 수 없습니다.\n\n{message}",
+            )
+
+        thread.started.connect(worker.run)
+        worker.succeeded.connect(on_succeeded)
+        worker.failed.connect(on_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(cleanup)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return True
+
     def _download_and_install_update(self, info: UpdateInfo) -> None:
         if self.update_service is None:
+            return
+        if self._start_update_install_worker(info):
             return
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
