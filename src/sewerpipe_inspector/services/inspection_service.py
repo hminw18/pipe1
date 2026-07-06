@@ -329,3 +329,74 @@ class InspectionService:
         if self.training_upload_service is not None:
             self.training_upload_service.queue_report_snapshot(report_id, "excel")
         return generated_path
+
+    def generate_internal_defect_workbook(
+        self,
+        report_ids: list[int],
+        report_path: Path,
+        *,
+        include_photos: bool = False,
+    ) -> Path:
+        if not report_ids:
+            raise ValueError("선택된 보고서가 없습니다")
+        business_context = self.db.get_report_context(report_ids[0])
+        if business_context is None:
+            raise ValueError("보고서 정보를 찾을 수 없습니다")
+        report_data = [self._workbook_data_for_report(report_id) for report_id in report_ids]
+        return self.report.generate_internal_defect_workbook(
+            report_path=report_path,
+            business_context=business_context,
+            reports=report_data,
+            include_photos=include_photos,
+        )
+
+    def generate_defect_aggregate_workbook(
+        self, report_ids: list[int], report_path: Path
+    ) -> Path:
+        if not report_ids:
+            raise ValueError("선택된 보고서가 없습니다")
+        business_context = self.db.get_report_context(report_ids[0])
+        if business_context is None:
+            raise ValueError("보고서 정보를 찾을 수 없습니다")
+        report_data = [self._workbook_data_for_report(report_id) for report_id in report_ids]
+        return self.report.generate_defect_aggregate_workbook(
+            report_path=report_path,
+            business_context=business_context,
+            reports=report_data,
+        )
+
+    def _workbook_data_for_report(self, report_id: int) -> dict[str, object]:
+        context = self.db.get_report_context(report_id)
+        report = self.db.get_report(report_id)
+        pipe_info = self.db.get_pipe_information(report_id)
+        upstream = self.db.get_manhole(report_id, "upstream")
+        downstream = self.db.get_manhole(report_id, "downstream")
+        actual = self.db.get_actual_survey(report_id)
+        if context is None or report is None:
+            raise ValueError("보고서 정보를 찾을 수 없습니다")
+        defects = self.db.list_defects(report_id)
+        defect_payload: list[DefectReportRow] = [
+            {
+                "timestamp_ms": row["timestamp_ms"],
+                "drive_direction": row["drive_direction"],
+                "distance_m": row["distance_m"],
+                "item_category": row["item_category"],
+                "condition_item": row["condition_item"],
+                "defect_item": row["defect_item"],
+                "grade": row["grade"],
+                "quadrant": row["quadrant"],
+                "manhole_defect_depth_m": row["manhole_defect_depth_m"],
+                "memo": row["memo"],
+                "image_path": row["image_path"],
+            }
+            for row in defects
+        ]
+        return {
+            "context": context,
+            "report": report,
+            "pipe_info": pipe_info,
+            "upstream_manhole": upstream,
+            "downstream_manhole": downstream,
+            "actual_survey": actual,
+            "defects": defect_payload,
+        }

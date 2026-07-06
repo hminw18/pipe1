@@ -5,6 +5,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Optional
 
 import cv2
@@ -75,6 +76,8 @@ from sewerpipe_inspector.defect_taxonomy import (
     condition_items_for_category,
     defect_definitions_for_category,
     defect_score,
+    display_condition_item,
+    display_defect_item,
     grades_for_defect,
 )
 from sewerpipe_inspector.logging_config import configure_logging
@@ -128,6 +131,7 @@ TABLE_GRID_COLOR = "#d7dde8"
 VIDEO_FILE_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 VIDEO_DISPLAY_WIDTH = 604
 VIDEO_DISPLAY_HEIGHT = 340
+REPORT_VIEW_SCALE_STEPS = (0.8, 0.9, 1.0, 1.1, 1.2)
 STOP_ANALYSIS_CANDIDATE_WORKERS = 8
 STOP_SEGMENT_PANEL_DEFAULT_WIDTH = 137
 STOP_SEGMENT_PANEL_MIN_WIDTH = 42
@@ -432,6 +436,23 @@ QPushButton#exportButton {
 }
 QPushButton#exportButton:hover {
     background-color: #1f2f50;
+}
+QPushButton#reportZoomButton {
+    background-color: #ffffff;
+    border: 1px solid #cfd7e5;
+    color: #24324a;
+    font-weight: 700;
+    padding: 4px 8px;
+}
+QPushButton#reportZoomButton:disabled {
+    background-color: #f4f6fa;
+    color: #a3adbd;
+}
+QLabel#reportZoomLabel {
+    background-color: transparent;
+    color: #374151;
+    font-weight: 700;
+    min-width: 42px;
 }
 QTableWidget {
     background-color: #ffffff;
@@ -1112,6 +1133,16 @@ def read_only_table_item(
     return item
 
 
+def checkable_table_item(
+    *, checked: bool = False, row_index: int | None = None
+) -> QTableWidgetItem:
+    item = read_only_table_item("", row_index=row_index)
+    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+    item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    return item
+
+
 class TableBackgroundDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index) -> None:
         background = index.data(Qt.ItemDataRole.BackgroundRole)
@@ -1132,6 +1163,72 @@ class TableBackgroundDelegate(QStyledItemDelegate):
         painter.drawLine(opt.rect.topRight(), opt.rect.bottomRight())
         painter.drawLine(opt.rect.bottomLeft(), opt.rect.bottomRight())
         painter.restore()
+
+
+class CheckBoxHeader(QHeaderView):
+    toggled = Signal(bool)
+
+    def __init__(self, checkbox_column: int, parent=None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.checkbox_column = checkbox_column
+        self.checkbox = QCheckBox(self)
+        self.checkbox.setTristate(False)
+        self.checkbox.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.checkbox.stateChanged.connect(
+            lambda state: self.toggled.emit(
+                Qt.CheckState(state) == Qt.CheckState.Checked
+            )
+        )
+        self.setSectionsClickable(True)
+        self.sectionResized.connect(lambda *_args: self._update_checkbox_geometry())
+        self.sectionMoved.connect(lambda *_args: self._update_checkbox_geometry())
+        self.geometriesChanged.connect(self._update_checkbox_geometry)
+        QTimer.singleShot(0, self._update_checkbox_geometry)
+
+    def setChecked(self, checked: bool) -> None:
+        self.checkbox.blockSignals(True)
+        try:
+            self.checkbox.setChecked(bool(checked))
+        finally:
+            self.checkbox.blockSignals(False)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_checkbox_geometry()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        self._update_checkbox_geometry()
+
+    def mousePressEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        logical_index = self.logicalIndexAt(pos)
+        if (
+            logical_index == self.checkbox_column
+            and not self.checkbox.geometry().contains(pos)
+        ):
+            self.checkbox.toggle()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _update_checkbox_geometry(self) -> None:
+        if self.isSectionHidden(self.checkbox_column):
+            self.checkbox.hide()
+            return
+        section_x = self.sectionViewportPosition(self.checkbox_column)
+        section_width = self.sectionSize(self.checkbox_column)
+        checkbox_size = self.checkbox.sizeHint()
+        x = section_x + (section_width - checkbox_size.width()) // 2
+        y = (self.height() - checkbox_size.height()) // 2
+        self.checkbox.setGeometry(
+            x,
+            max(0, y),
+            checkbox_size.width(),
+            checkbox_size.height(),
+        )
+        self.checkbox.show()
+        self.checkbox.raise_()
 
 
 class SidebarRestoreHandle(QPushButton):
@@ -1231,6 +1328,7 @@ class PopupTablePickerButton(QPushButton):
         self._current_text = ""
         self._headers: list[str] = []
         self._rows: list[list[object]] = []
+        self._display_by_value: dict[str, str] = {}
         self._grid_columns = 0
         self._allow_empty = False
         self._popup: QFrame | None = None
@@ -1259,19 +1357,31 @@ class PopupTablePickerButton(QPushButton):
         self._update_button_text()
         self.currentTextChanged.emit(self._current_text)
 
-    def set_grid_items(self, items: list[str], columns: int = 3) -> None:
+    def set_grid_items(
+        self,
+        items: list[str],
+        columns: int = 3,
+        display_texts: dict[str, str] | None = None,
+    ) -> None:
         self._headers = []
         self._rows = ([[""]] if self._allow_empty else []) + [[item] for item in items]
+        self._display_by_value = display_texts or {}
         self._grid_columns = columns
         self.setCurrentText(
             self._current_text,
             "" if self._allow_empty else items[0] if items else None,
         )
 
-    def set_table_items(self, headers: list[str], rows: list[list[object]]) -> None:
+    def set_table_items(
+        self,
+        headers: list[str],
+        rows: list[list[object]],
+        display_texts: dict[str, str] | None = None,
+    ) -> None:
         self._headers = headers
         empty_row = [[""] + [""] * (max(1, len(headers)) - 1)] if self._allow_empty else []
         self._rows = empty_row + rows
+        self._display_by_value = display_texts or {}
         self._grid_columns = 0
         default = str(rows[0][0]) if rows else None
         self.setCurrentText(self._current_text, "" if self._allow_empty else default)
@@ -1279,8 +1389,16 @@ class PopupTablePickerButton(QPushButton):
     def _values(self) -> list[str]:
         return [str(row[0]) for row in self._rows if row]
 
+    def _display_text_for_value(self, value: object) -> str:
+        if value in (None, ""):
+            return ""
+        raw = str(value)
+        return self._display_by_value.get(raw, raw)
+
     def _update_button_text(self) -> None:
-        self.setText(self._current_text or self._placeholder)
+        self.setText(
+            self._display_text_for_value(self._current_text) or self._placeholder
+        )
 
     def _show_popup(self) -> None:
         if not self._rows:
@@ -1409,13 +1527,17 @@ class PopupTablePickerButton(QPushButton):
         table.setColumnCount(columns)
         table.horizontalHeader().hide()
         for col in range(columns):
-            table.setColumnWidth(col, 210)
+            table.setColumnWidth(col, 230)
         for row in range(row_count):
             table.setRowHeight(row, 62)
         for idx, row_values in enumerate(self._rows):
             row = idx // columns
             col = idx % columns
-            display_value = str(row_values[0]) if row_values[0] not in (None, "") else "(빈칸)"
+            display_value = (
+                self._display_text_for_value(row_values[0])
+                if row_values[0] not in (None, "")
+                else "(빈칸)"
+            )
             item = read_only_table_item(display_value)
             item.setData(Qt.ItemDataRole.UserRole, str(row_values[0]))
             table.setItem(row, col, item)
@@ -1436,14 +1558,21 @@ class PopupTablePickerButton(QPushButton):
         table.setColumnCount(len(self._headers))
         table.setHorizontalHeaderLabels(self._headers)
         configure_table_headers(table)
-        widths = [210, 76, 64, 64, 64]
+        widths = [250, 76, 64, 64, 64]
         for col, width in enumerate(widths[: len(self._headers)]):
             table.setColumnWidth(col, width)
         row_height = 48
         for row, row_values in enumerate(self._rows):
             table.setRowHeight(row, row_height)
             for col, value in enumerate(row_values):
-                display_value = "(빈칸)" if col == 0 and value in (None, "") else value
+                if col == 0:
+                    display_value = (
+                        "(빈칸)"
+                        if value in (None, "")
+                        else self._display_text_for_value(value)
+                    )
+                else:
+                    display_value = value
                 item = read_only_table_item(display_value)
                 item.setData(Qt.ItemDataRole.UserRole, str(row_values[0]))
                 table.setItem(row, col, item)
@@ -1528,11 +1657,12 @@ def apply_column_widths(
     table: QTableWidget,
     widths: dict[int, int],
     stretch_columns: set[int] | None = None,
+    minimum_section_size: int = 46,
 ) -> None:
     stretch_columns = stretch_columns or set()
     header = table.horizontalHeader()
     header.setStretchLastSection(False)
-    header.setMinimumSectionSize(46)
+    header.setMinimumSectionSize(minimum_section_size)
     for col in range(table.columnCount()):
         table.setColumnWidth(col, widths.get(col, 100))
         if col in stretch_columns:
@@ -1547,6 +1677,10 @@ def configure_line_edit(edit: QLineEdit, width: int | None = None) -> None:
     edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     if width is not None:
         edit.setMinimumWidth(width)
+
+
+def align_direct_input_left(edit: QLineEdit) -> None:
+    edit.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
 
 def configure_combo(combo: QComboBox, width: int | None = None) -> None:
@@ -1668,6 +1802,9 @@ class MainWindow(QMainWindow):
         self.update_service = update_service
         self.update_info: UpdateInfo | None = None
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.report_view_scale = self._nearest_report_view_scale(
+            load_settings().report_view_scale
+        )
 
         self.current_project_id: Optional[int] = None
         self.current_business_id: Optional[int] = None
@@ -1702,6 +1839,7 @@ class MainWindow(QMainWindow):
         self._report_details_dirty = False
         self._expanded_report_version_groups: set[int] = set()
         self._syncing_defect_item_state = False
+        self._syncing_report_output_checks = False
         self._database_error_reported = False
 
         self.report_inputs: dict[str, QLineEdit] = {}
@@ -1712,6 +1850,8 @@ class MainWindow(QMainWindow):
         self.report_controls: list[QWidget] = []
         self.video_drop_targets: list[QWidget] = []
         self._shortcuts: list[QShortcut] = []
+        self._report_scaled_table_specs: list[dict[str, object]] = []
+        self._report_scaled_widget_specs: list[dict[str, object]] = []
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._play_tick)
@@ -1775,6 +1915,224 @@ class MainWindow(QMainWindow):
         self.sidebar_restore_handle.dragged.connect(self._drag_restore_sidebar)
         self.sidebar_restore_handle.hide()
         QTimer.singleShot(0, self._update_sidebar_restore_handle)
+
+    @staticmethod
+    def _nearest_report_view_scale(scale: object) -> float:
+        try:
+            value = float(scale)
+        except (TypeError, ValueError):
+            value = 1.0
+        return min(REPORT_VIEW_SCALE_STEPS, key=lambda item: abs(item - value))
+
+    def _report_view_scale_index(self) -> int:
+        return REPORT_VIEW_SCALE_STEPS.index(
+            self._nearest_report_view_scale(self.report_view_scale)
+        )
+
+    def _scale_px(self, value: int | float, minimum: int = 1) -> int:
+        if value <= 0:
+            return int(value)
+        return max(minimum, int(round(float(value) * self.report_view_scale)))
+
+    def _scaled_column_widths(self, widths: dict[int, int]) -> dict[int, int]:
+        return {
+            col: 0 if width <= 0 else self._scale_px(width, 32)
+            for col, width in widths.items()
+        }
+
+    def _configure_report_scaled_table(
+        self,
+        table: QTableWidget,
+        row_height: int,
+        column_widths: dict[int, int],
+        stretch_columns: set[int] | None = None,
+    ) -> None:
+        configure_table_rows(table, self._scale_px(row_height, 24))
+        spec: dict[str, object] = {
+            "table": table,
+            "row_height": row_height,
+            "column_widths": dict(column_widths),
+            "stretch_columns": set(stretch_columns or set()),
+            "row_heights": {},
+        }
+        self._report_scaled_table_specs.append(spec)
+        self._apply_report_scaled_table(spec, fit_height=False)
+
+    def _set_report_scaled_table_row_height(
+        self, table: QTableWidget, row: int, row_height: int
+    ) -> None:
+        for spec in self._report_scaled_table_specs:
+            if spec.get("table") is not table:
+                continue
+            row_heights = spec.get("row_heights")
+            if isinstance(row_heights, dict):
+                row_heights[row] = row_height
+            break
+        table.setRowHeight(row, self._scale_px(row_height, 24))
+
+    def _apply_report_scaled_table(
+        self, spec: dict[str, object], *, fit_height: bool = True
+    ) -> None:
+        table = spec.get("table")
+        if not isinstance(table, QTableWidget):
+            return
+        row_height = int(spec.get("row_height") or 38)
+        scaled_row_height = self._scale_px(row_height, 24)
+        table.verticalHeader().setDefaultSectionSize(scaled_row_height)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, scaled_row_height)
+
+        column_widths = spec.get("column_widths")
+        stretch_columns = spec.get("stretch_columns")
+        if isinstance(column_widths, dict):
+            apply_column_widths(
+                table,
+                self._scaled_column_widths(column_widths),
+                stretch_columns if isinstance(stretch_columns, set) else set(),
+                self._scale_px(46, 32),
+            )
+
+        row_heights = spec.get("row_heights")
+        if isinstance(row_heights, dict):
+            for row, custom_height in row_heights.items():
+                if isinstance(row, int) and row < table.rowCount():
+                    table.setRowHeight(row, self._scale_px(int(custom_height), 24))
+        if fit_height:
+            fit_table_height_to_contents(table)
+
+    def _register_report_scaled_widget(
+        self,
+        widget: QWidget,
+        *,
+        min_width: int | None = None,
+        min_height: int | None = None,
+        fixed_width: int | None = None,
+        fixed_height: int | None = None,
+    ) -> None:
+        spec: dict[str, object] = {
+            "widget": widget,
+            "min_width": min_width,
+            "min_height": min_height,
+            "fixed_width": fixed_width,
+            "fixed_height": fixed_height,
+        }
+        self._report_scaled_widget_specs.append(spec)
+        self._apply_report_scaled_widget(spec)
+
+    def _apply_report_scaled_widget(self, spec: dict[str, object]) -> None:
+        widget = spec.get("widget")
+        if not isinstance(widget, QWidget):
+            return
+        min_width = spec.get("min_width")
+        min_height = spec.get("min_height")
+        fixed_width = spec.get("fixed_width")
+        fixed_height = spec.get("fixed_height")
+        if isinstance(min_width, int):
+            widget.setMinimumWidth(self._scale_px(min_width, 0))
+        if isinstance(min_height, int):
+            widget.setMinimumHeight(self._scale_px(min_height, 1))
+        if isinstance(fixed_width, int) and isinstance(fixed_height, int):
+            widget.setFixedSize(
+                self._scale_px(fixed_width, 1),
+                self._scale_px(fixed_height, 1),
+            )
+        elif isinstance(fixed_width, int):
+            widget.setFixedWidth(self._scale_px(fixed_width, 1))
+        elif isinstance(fixed_height, int):
+            widget.setFixedHeight(self._scale_px(fixed_height, 1))
+
+    def _apply_report_detail_font_scale(self) -> None:
+        if not hasattr(self, "report_detail_content"):
+            return
+        base_font_px = self._scale_px(13, 10)
+        section_font_px = self._scale_px(17, 13)
+        input_min_height = self._scale_px(24, 18)
+        table_input_min_height = self._scale_px(22, 17)
+        picker_min_height = self._scale_px(28, 20)
+        input_padding_y = max(1, self._scale_px(2, 1))
+        input_padding_x = max(3, self._scale_px(6, 3))
+        table_padding_y = max(0, self._scale_px(1, 0))
+        table_padding_x = max(2, self._scale_px(4, 2))
+        self.report_detail_content.setStyleSheet(
+            f"""
+QWidget#reportDetailContent,
+QWidget#reportDetailContent QWidget {{
+    font-size: {base_font_px}px;
+}}
+QWidget#reportDetailContent QLabel#sectionTitle {{
+    font-size: {section_font_px}px;
+}}
+QWidget#reportDetailContent QLineEdit,
+QWidget#reportDetailContent QComboBox {{
+    min-height: {input_min_height}px;
+    padding: {input_padding_y}px {input_padding_x}px;
+}}
+QWidget#reportDetailContent QTableWidget QLineEdit,
+QWidget#reportDetailContent QTableWidget QComboBox {{
+    min-height: {table_input_min_height}px;
+    padding: {table_padding_y}px {table_padding_x}px;
+}}
+QWidget#reportDetailContent QPushButton#tablePickerButton {{
+    min-height: {picker_min_height}px;
+    padding: {table_padding_y}px {input_padding_x}px;
+}}
+"""
+        )
+
+    def _apply_report_input_widget_scale(self) -> None:
+        if not hasattr(self, "report_detail_content"):
+            return
+        line_height = self._scale_px(24, 18)
+        picker_height = self._scale_px(28, 20)
+        for edit in self.report_detail_content.findChildren(QLineEdit):
+            edit.setFixedHeight(line_height)
+        for combo in self.report_detail_content.findChildren(QComboBox):
+            combo.setFixedHeight(line_height)
+        for picker in self.report_detail_content.findChildren(PopupTablePickerButton):
+            picker.setFixedHeight(picker_height)
+        for label in (
+            getattr(self, "completion_label", None),
+            getattr(self, "undriven_label", None),
+        ):
+            if isinstance(label, QLabel):
+                label.setFixedHeight(line_height)
+
+    def _apply_report_view_scale(self) -> None:
+        self._apply_report_detail_font_scale()
+        self._apply_report_input_widget_scale()
+        for spec in self._report_scaled_table_specs:
+            self._apply_report_scaled_table(spec)
+        for spec in self._report_scaled_widget_specs:
+            self._apply_report_scaled_widget(spec)
+        if hasattr(self, "report_zoom_label"):
+            self.report_zoom_label.setFixedWidth(self._scale_px(42, 34))
+        if hasattr(self, "video_label"):
+            self.video_label.updateGeometry()
+            self.video_label.update()
+        if hasattr(self, "capture_preview_label"):
+            self.capture_preview_label.updateGeometry()
+            self.capture_preview_label.update()
+        self._position_video_overlay()
+        self._update_report_zoom_controls()
+
+    def _change_report_view_scale(self, direction: int) -> None:
+        index = self._report_view_scale_index()
+        next_index = max(0, min(len(REPORT_VIEW_SCALE_STEPS) - 1, index + direction))
+        if next_index == index:
+            return
+        self.report_view_scale = REPORT_VIEW_SCALE_STEPS[next_index]
+        self._apply_report_view_scale()
+        settings = load_settings()
+        settings.report_view_scale = self.report_view_scale
+        save_settings(settings)
+
+    def _update_report_zoom_controls(self) -> None:
+        if not hasattr(self, "report_zoom_label"):
+            return
+        index = self._report_view_scale_index()
+        self.report_zoom_label.setText(f"{int(round(self.report_view_scale * 100))}%")
+        self.report_zoom_out_button.setEnabled(index > 0)
+        self.report_zoom_in_button.setEnabled(index < len(REPORT_VIEW_SCALE_STEPS) - 1)
 
     def _sidebar_width(self) -> int:
         sizes = self.main_splitter.sizes()
@@ -1894,6 +2252,7 @@ class MainWindow(QMainWindow):
         self.detect_stop_button = QPushButton("분석")
         self.detect_stop_button.setObjectName("stopAnalyzeButton")
         self.detect_stop_button.setFixedHeight(28)
+        self._register_report_scaled_widget(self.detect_stop_button, fixed_height=28)
         self.detect_stop_button.clicked.connect(self.detect_stop_segments)
         self.show_stop_only_checkbox = QCheckBox("")
         self.show_stop_only_checkbox.hide()
@@ -1913,7 +2272,11 @@ class MainWindow(QMainWindow):
         self.video_label.setObjectName("videoLabel")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.video_label.setFixedSize(VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT)
+        self._register_report_scaled_widget(
+            self.video_label,
+            fixed_width=VIDEO_DISPLAY_WIDTH,
+            fixed_height=VIDEO_DISPLAY_HEIGHT,
+        )
         self.video_label.setMouseTracking(True)
         self._install_video_drop_target(self.video_label)
 
@@ -1939,6 +2302,11 @@ class MainWindow(QMainWindow):
         video_area_layout.addWidget(self.video_label, 1, 0)
         video_area_layout.addWidget(self.stop_segment_panel, 1, 1)
         self.stop_segment_resize_handle = StopSegmentResizeHandle(self)
+        self._register_report_scaled_widget(
+            self.stop_segment_resize_handle,
+            fixed_width=STOP_SEGMENT_RESIZE_HANDLE_WIDTH,
+            fixed_height=VIDEO_DISPLAY_HEIGHT,
+        )
         self.stop_segment_resize_handle.drag_started.connect(
             self._start_stop_segment_panel_resize
         )
@@ -1965,8 +2333,10 @@ class MainWindow(QMainWindow):
         self.capture_preview_label = StableImageLabel("캡처된 프레임 없음", self)
         self.capture_preview_label.setObjectName("capturePreviewLabel")
         self.capture_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.capture_preview_label.setFixedSize(
-            VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT
+        self._register_report_scaled_widget(
+            self.capture_preview_label,
+            fixed_width=VIDEO_DISPLAY_WIDTH,
+            fixed_height=VIDEO_DISPLAY_HEIGHT,
         )
         layout.addWidget(self.capture_preview_label, 1, 1)
 
@@ -1974,6 +2344,7 @@ class MainWindow(QMainWindow):
         self.timeline_slider.setObjectName("timelineSlider")
         self.timeline_slider.setMinimum(0)
         self.timeline_slider.setFixedHeight(18)
+        self._register_report_scaled_widget(self.timeline_slider, fixed_height=18)
         self.timeline_slider.sliderPressed.connect(self._on_slider_pressed)
         self.timeline_slider.sliderReleased.connect(self._seek_from_slider)
         self.timeline_slider.markerClicked.connect(self._seek_to_marker)
@@ -2005,6 +2376,11 @@ class MainWindow(QMainWindow):
         self.speed_button = QPushButton("1.0X", self)
         self.speed_button.setObjectName("playerTextButton")
         self.speed_button.setFixedSize(46, 28)
+        self._register_report_scaled_widget(
+            self.speed_button,
+            fixed_width=46,
+            fixed_height=28,
+        )
         self.speed_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.speed_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.speed_button.setToolTip("재생 속도 변경")
@@ -2089,7 +2465,7 @@ class MainWindow(QMainWindow):
         panel.setObjectName("stopSegmentPanel")
         panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         panel.setFixedWidth(STOP_SEGMENT_PANEL_DEFAULT_WIDTH)
-        panel.setFixedHeight(VIDEO_DISPLAY_HEIGHT)
+        self._register_report_scaled_widget(panel, fixed_height=VIDEO_DISPLAY_HEIGHT)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 6, 0, 0)
@@ -2097,6 +2473,7 @@ class MainWindow(QMainWindow):
 
         self.stop_segment_header = QWidget(self)
         self.stop_segment_header.setFixedHeight(30)
+        self._register_report_scaled_widget(self.stop_segment_header, fixed_height=30)
         self.stop_segment_header_layout = QHBoxLayout(self.stop_segment_header)
         self.stop_segment_header_layout.setContentsMargins(8, 0, 6, 0)
         self.stop_segment_header_layout.setSpacing(4)
@@ -2125,6 +2502,9 @@ class MainWindow(QMainWindow):
         self.stop_analysis_progress_bar.setRange(0, 100)
         self.stop_analysis_progress_bar.setTextVisible(True)
         self.stop_analysis_progress_bar.setFixedHeight(14)
+        self._register_report_scaled_widget(
+            self.stop_analysis_progress_bar, fixed_height=14
+        )
         self.stop_analysis_progress_bar.hide()
 
         layout.addWidget(self.stop_segment_header)
@@ -2394,21 +2774,48 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         card, card_layout = self._build_content_card()
         self.report_count_label = QLabel("총 0건", self)
-        card_layout.addLayout(
-            self._build_card_action_row(
-                self.report_count_label,
-                [
-                    ("보고서 생성", self.create_report_from_right, "primaryButton"),
-                    ("선택 열기", self.open_selected_report_from_right, "secondaryButton"),
-                    ("선택 복제", self.duplicate_selected_report_from_right, "secondaryButton"),
-                    ("선택 수정", self.edit_selected_report_from_right, "secondaryButton"),
-                    ("선택 삭제", self.delete_selected_report_from_right, "dangerButton"),
-                ],
+        self.report_count_label.setObjectName("cardMeta")
+        output_action_row = QHBoxLayout()
+        output_action_row.setContentsMargins(0, 0, 0, 0)
+        output_action_row.setSpacing(8)
+        output_action_row.addStretch(1)
+        output_action_row.addWidget(
+            self._make_action_button(
+                "보고서 출력", self.export_selected_report_from_right, "exportButton"
             )
         )
+        card_layout.addLayout(output_action_row)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(8)
+        action_row.addWidget(self.report_count_label)
+        action_row.addStretch(1)
+        for text, callback, object_name in [
+            ("보고서 추가", self.create_report_from_right, "primaryButton"),
+            ("선택 열기", self.open_selected_report_from_right, "secondaryButton"),
+            ("선택 복제", self.duplicate_selected_report_from_right, "secondaryButton"),
+            ("선택 수정", self.edit_selected_report_from_right, "secondaryButton"),
+            ("선택 삭제", self.delete_selected_report_from_right, "dangerButton"),
+        ]:
+            action_row.addWidget(self._make_action_button(text, callback, object_name))
+        card_layout.addLayout(action_row)
+        report_column_widths = {
+            0: 0,
+            1: 48,
+            2: 260,
+            3: 135,
+            4: 120,
+            5: 95,
+            6: 120,
+            7: 85,
+            8: 70,
+            9: 80,
+            10: 80,
+        }
         self.report_table = self._build_entity_table(
             [
                 "ID",
+                "",
                 "보고서번호",
                 "관로번호",
                 "조사일자",
@@ -2419,22 +2826,22 @@ class MainWindow(QMainWindow):
                 "결함 수",
                 "버전 수",
             ],
-            {
-                0: 0,
-                1: 115,
-                2: 115,
-                3: 120,
-                4: 95,
-                5: 120,
-                6: 85,
-                7: 70,
-                8: 80,
-                9: 80,
-            },
-            {2},
+            report_column_widths,
         )
+        self.report_output_header = CheckBoxHeader(1, self.report_table)
+        self.report_output_header.toggled.connect(
+            self._set_report_output_selection_checked
+        )
+        self.report_table.setHorizontalHeader(self.report_output_header)
+        configure_table_headers(self.report_table)
+        apply_column_widths(self.report_table, report_column_widths)
+        self.report_table.setColumnHidden(0, True)
+        self.report_table.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.report_table.itemChanged.connect(self._sync_report_output_select_all_state)
         self.report_table.itemDoubleClicked.connect(
-            lambda _item: self.open_selected_report_from_right()
+            self._handle_report_table_double_clicked
         )
         card_layout.addWidget(self.report_table)
         layout.addWidget(card)
@@ -2449,6 +2856,8 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         content = QWidget(scroll)
+        content.setObjectName("reportDetailContent")
+        self.report_detail_content = content
         self.right_layout = QVBoxLayout(content)
         self.right_layout.setContentsMargins(12, 12, 12, 12)
         self.right_layout.setSpacing(12)
@@ -2472,14 +2881,40 @@ class MainWindow(QMainWindow):
         self.right_layout.addWidget(self._build_defect_table_group())
         self._configure_report_detail_tab_order()
         self.right_layout.addStretch(1)
+        self._apply_report_view_scale()
         return panel
 
     def _build_report_export_bar(self) -> QWidget:
         bar = QWidget(self)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.report_zoom_out_button = QPushButton("-")
+        self.report_zoom_out_button.setObjectName("reportZoomButton")
+        self.report_zoom_out_button.setToolTip("축소")
+        self.report_zoom_out_button.clicked.connect(
+            lambda: self._change_report_view_scale(-1)
+        )
+        self.report_zoom_label = QLabel("", self)
+        self.report_zoom_label.setObjectName("reportZoomLabel")
+        self.report_zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.report_zoom_in_button = QPushButton("+")
+        self.report_zoom_in_button.setObjectName("reportZoomButton")
+        self.report_zoom_in_button.setToolTip("확대")
+        self.report_zoom_in_button.clicked.connect(
+            lambda: self._change_report_view_scale(1)
+        )
+        for button in (self.report_zoom_out_button, self.report_zoom_in_button):
+            self._register_report_scaled_widget(
+                button,
+                fixed_width=30,
+                fixed_height=28,
+            )
+        layout.addWidget(self.report_zoom_out_button)
+        layout.addWidget(self.report_zoom_label)
+        layout.addWidget(self.report_zoom_in_button)
         layout.addStretch(1)
-        self.report_export_button = QPushButton("보고서 생성")
+        self.report_export_button = QPushButton("보고서 출력")
         self.report_export_button.clicked.connect(self.open_report_export_dialog)
         self.report_export_button.setObjectName("exportButton")
         layout.addWidget(self.report_export_button)
@@ -2507,11 +2942,12 @@ class MainWindow(QMainWindow):
         table = QTableWidget(4, 4, self)
         table.horizontalHeader().hide()
         table.verticalHeader().hide()
-        configure_table_rows(table, 38)
-        apply_column_widths(table, {0: 130, 1: 220, 2: 130, 3: 220})
+        self._configure_report_scaled_table(
+            table, 38, {0: 130, 1: 220, 2: 130, 3: 220}
+        )
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        table.setFixedHeight(160)
+        fit_table_height_to_contents(table)
         return table
 
     def _build_report_info_table(self) -> QTableWidget:
@@ -2519,9 +2955,9 @@ class MainWindow(QMainWindow):
         table.setObjectName("reportInfoTable")
         table.horizontalHeader().hide()
         table.verticalHeader().hide()
-        configure_table_rows(table, 40)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             table,
+            40,
             {0: 104, 1: 230, 2: 104, 3: 230, 4: 104, 5: 230},
             {1, 3, 5},
         )
@@ -2534,6 +2970,7 @@ class MainWindow(QMainWindow):
                 table.setItem(row, label_col, read_only_table_item(label, is_label=True))
                 edit = QLineEdit(self)
                 configure_line_edit(edit)
+                align_direct_input_left(edit)
                 edit.textChanged.connect(self.update_export_state)
                 edit.textChanged.connect(self.schedule_report_autosave)
                 self.report_inputs[field] = edit
@@ -2562,9 +2999,9 @@ class MainWindow(QMainWindow):
         )
         configure_table_headers(self.pipe_manhole_table)
         self.pipe_manhole_table.verticalHeader().hide()
-        configure_table_rows(self.pipe_manhole_table, 38)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             self.pipe_manhole_table,
+            38,
             {
                 0: 86,
                 1: 84,
@@ -2583,7 +3020,7 @@ class MainWindow(QMainWindow):
         )
         self.pipe_manhole_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.pipe_manhole_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self.pipe_manhole_table.setRowHeight(2, 42)
+        self._set_report_scaled_table_row_height(self.pipe_manhole_table, 2, 42)
         for row, role, label in (
             (0, "upstream", "상류맨홀*"),
             (1, "downstream", "하류맨홀*"),
@@ -2599,6 +3036,7 @@ class MainWindow(QMainWindow):
                 else:
                     edit = QLineEdit(self)
                     configure_line_edit(edit)
+                    align_direct_input_left(edit)
                     edit.textChanged.connect(self.update_export_state)
                     edit.textChanged.connect(self.schedule_report_autosave)
                 if field == "manhole_number":
@@ -2611,6 +3049,8 @@ class MainWindow(QMainWindow):
         self.total_drive_input = QLineEdit(self)
         configure_line_edit(self.length_input, 90)
         configure_line_edit(self.total_drive_input, 90)
+        align_direct_input_left(self.length_input)
+        align_direct_input_left(self.total_drive_input)
         self.completion_label = QLabel("미완주")
         self.undriven_label = QLabel("")
         for label in (self.completion_label, self.undriven_label):
@@ -2648,15 +3088,15 @@ class MainWindow(QMainWindow):
         )
         configure_table_headers(self.actual_table)
         self.actual_table.verticalHeader().hide()
-        configure_table_rows(self.actual_table, 38)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             self.actual_table,
+            38,
             {0: 104, 1: 180, 2: 110, 3: 140, 4: 360},
             {1, 4},
         )
         self.actual_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.actual_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
-        self.actual_table.setRowHeight(2, 40)
+        self._set_report_scaled_table_row_height(self.actual_table, 2, 40)
         self.actual_table.setItem(0, 0, read_only_table_item("시작->끝", is_label=True))
         self.actual_table.setItem(1, 0, read_only_table_item("끝->시작", is_label=True))
         self.start_direction_item = read_only_table_item("", row_index=0)
@@ -2669,6 +3109,8 @@ class MainWindow(QMainWindow):
         self.end_reason_combo = QComboBox(self)
         configure_line_edit(self.start_occurrence_input)
         configure_line_edit(self.end_occurrence_input)
+        align_direct_input_left(self.start_occurrence_input)
+        align_direct_input_left(self.end_occurrence_input)
         configure_combo(self.start_reason_combo)
         configure_combo(self.end_reason_combo)
         self.start_reason_combo.addItems(UNDROVE_REASONS)
@@ -2679,6 +3121,8 @@ class MainWindow(QMainWindow):
         self.end_reason_detail_input = QLineEdit(self)
         configure_line_edit(self.start_reason_detail_input)
         configure_line_edit(self.end_reason_detail_input)
+        align_direct_input_left(self.start_reason_detail_input)
+        align_direct_input_left(self.end_reason_detail_input)
         for edit in (
             self.start_occurrence_input,
             self.end_occurrence_input,
@@ -2696,6 +3140,7 @@ class MainWindow(QMainWindow):
         self.actual_table.setSpan(2, 1, 1, 4)
         self.survey_content_input = QLineEdit(self)
         configure_line_edit(self.survey_content_input)
+        align_direct_input_left(self.survey_content_input)
         self.survey_content_input.textChanged.connect(self.schedule_report_autosave)
         self.actual_table.setCellWidget(2, 1, self.survey_content_input)
         self.report_controls.extend(
@@ -2738,8 +3183,8 @@ class MainWindow(QMainWindow):
             self.defect_drive_direction_combo: 84,
             self.distance_input: 80,
             self.item_category_combo: 76,
-            self.condition_item_combo: 170,
-            self.defect_item_combo: 190,
+            self.condition_item_combo: 190,
+            self.defect_item_combo: 210,
             self.grade_combo: 64,
             self.quadrant_combo: 108,
             self.manhole_defect_depth_input: 82,
@@ -2747,15 +3192,17 @@ class MainWindow(QMainWindow):
         for widget, width in compact_widths.items():
             if isinstance(widget, QLineEdit):
                 configure_line_edit(widget, width)
+                align_direct_input_left(widget)
             elif isinstance(widget, QComboBox):
                 configure_combo(widget, width)
         for widget, width in (
-            (self.condition_item_combo, 170),
-            (self.defect_item_combo, 190),
+            (self.condition_item_combo, 190),
+            (self.defect_item_combo, 210),
         ):
             widget.setMinimumWidth(width)
             widget.setMinimumHeight(28)
         configure_line_edit(self.memo_input)
+        align_direct_input_left(self.memo_input)
         for widget in (
             self.defect_drive_direction_combo,
             self.distance_input,
@@ -2803,10 +3250,9 @@ class MainWindow(QMainWindow):
         self.defect_form_table = QTableWidget(2, len(first_row_fields) * 2, self)
         self.defect_form_table.horizontalHeader().hide()
         self.defect_form_table.verticalHeader().hide()
-        configure_table_rows(self.defect_form_table, 46)
-        self.defect_form_table.setRowHeight(1, 42)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             self.defect_form_table,
+            46,
             {
                 0: 54,
                 1: 88,
@@ -2815,9 +3261,9 @@ class MainWindow(QMainWindow):
                 4: 52,
                 5: 82,
                 6: 52,
-                7: 170,
+                7: 190,
                 8: 52,
-                9: 190,
+                9: 210,
                 10: 56,
                 11: 66,
                 12: 66,
@@ -2827,6 +3273,7 @@ class MainWindow(QMainWindow):
             },
             {7, 9},
         )
+        self._set_report_scaled_table_row_height(self.defect_form_table, 1, 42)
         self.defect_form_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.defect_form_table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         for idx, (label, widget) in enumerate(first_row_fields):
@@ -2971,10 +3418,19 @@ class MainWindow(QMainWindow):
         condition_items = condition_items_for_category(category)
         self._syncing_defect_item_state = True
         try:
-            self.condition_item_combo.set_grid_items(condition_items, 3)
+            condition_display = {
+                item: display_condition_item(category, item) for item in condition_items
+            }
+            self.condition_item_combo.set_grid_items(
+                condition_items, 3, display_texts=condition_display
+            )
             self.condition_item_combo.setCurrentText(preferred_condition)
 
             definitions = defect_definitions_for_category(category)
+            defect_display = {
+                definition.item: display_defect_item(category, definition.item)
+                for definition in definitions
+            }
             rows = [
                 [
                     definition.item,
@@ -2986,7 +3442,9 @@ class MainWindow(QMainWindow):
                 for definition in definitions
             ]
             self.defect_item_combo.set_table_items(
-                ["항목", "결함종류", "대", "중", "소"], rows
+                ["항목", "결함종류", "대", "중", "소"],
+                rows,
+                display_texts=defect_display,
             )
             self.defect_item_combo.setCurrentText(preferred_defect)
         finally:
@@ -3101,9 +3559,9 @@ class MainWindow(QMainWindow):
         configure_table_headers(self.defect_table)
         self.defect_table.setColumnHidden(0, True)
         self.defect_table.setColumnHidden(1, True)
-        configure_table_rows(self.defect_table, 42)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             self.defect_table,
+            42,
             {
                 0: 0,
                 1: 0,
@@ -3112,8 +3570,8 @@ class MainWindow(QMainWindow):
                 4: 82,
                 5: 82,
                 6: 82,
-                7: 130,
-                8: 115,
+                7: 155,
+                8: 150,
                 9: 58,
                 10: 88,
                 11: 112,
@@ -3147,10 +3605,9 @@ class MainWindow(QMainWindow):
             ]
         )
         configure_table_headers(self.unit_state_grade_table)
-        configure_table_rows(self.unit_state_grade_table, 48)
-        self.unit_state_grade_table.setWordWrap(True)
-        apply_column_widths(
+        self._configure_report_scaled_table(
             self.unit_state_grade_table,
+            48,
             {
                 0: 56,
                 1: 360,
@@ -3164,6 +3621,7 @@ class MainWindow(QMainWindow):
             },
             {1},
         )
+        self.unit_state_grade_table.setWordWrap(True)
         self.unit_state_grade_table.setSelectionMode(
             QTableWidget.SelectionMode.NoSelection
         )
@@ -3556,6 +4014,111 @@ class MainWindow(QMainWindow):
         for col, value in enumerate(values, start=1):
             table.setItem(row, col, read_only_table_item(value, row_index=row))
 
+    def _set_report_table_row(
+        self, row: int, report_id: int, values: list[object]
+    ) -> None:
+        self.report_table.setItem(row, 0, read_only_table_item(report_id, row_index=row))
+        self.report_table.setItem(row, 1, read_only_table_item("", row_index=row))
+        self.report_table.setCellWidget(
+            row, 1, self._build_report_output_checkbox_widget(row)
+        )
+        for col, value in enumerate(values, start=2):
+            self.report_table.setItem(
+                row, col, read_only_table_item(value, row_index=row)
+            )
+
+    def _handle_report_table_double_clicked(self, item: QTableWidgetItem) -> None:
+        if item.column() == 1:
+            return
+        self.open_selected_report_from_right()
+
+    def _build_report_output_checkbox_widget(self, row_index: int) -> QWidget:
+        wrapper = QWidget(self.report_table)
+        wrapper.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row_color = TABLE_ROW_COLOR if row_index % 2 == 0 else TABLE_ALT_ROW_COLOR
+        wrapper.setStyleSheet(f"background-color: {row_color};")
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        checkbox = QCheckBox(wrapper)
+        checkbox.stateChanged.connect(
+            lambda _state: self._sync_report_output_select_all_state()
+        )
+        layout.addWidget(checkbox, alignment=Qt.AlignmentFlag.AlignCenter)
+        return wrapper
+
+    def _report_output_checkbox_for_row(self, row: int) -> QCheckBox | None:
+        wrapper = self.report_table.cellWidget(row, 1)
+        if wrapper is None:
+            return None
+        return wrapper.findChild(QCheckBox)
+
+    def _set_report_output_selection_checked(self, checked: bool) -> None:
+        if self._syncing_report_output_checks:
+            return
+        self._syncing_report_output_checks = True
+        try:
+            for row in range(self.report_table.rowCount()):
+                checkbox = self._report_output_checkbox_for_row(row)
+                if checkbox is not None:
+                    checkbox.setChecked(checked)
+        finally:
+            self._syncing_report_output_checks = False
+        self._sync_report_output_select_all_state()
+
+    def _sync_report_output_select_all_state(
+        self, item: QTableWidgetItem | None = None
+    ) -> None:
+        if self._syncing_report_output_checks:
+            return
+        if item is not None and item.column() != 1:
+            return
+        self._syncing_report_output_checks = True
+        try:
+            total = self.report_table.rowCount()
+            checked = sum(
+                1
+                for row in range(total)
+                if (
+                    (checkbox := self._report_output_checkbox_for_row(row)) is not None
+                    and checkbox.isChecked()
+                )
+            )
+            if checked == total and total > 0:
+                header_checked = True
+            else:
+                header_checked = False
+            self.report_output_header.setChecked(header_checked)
+        finally:
+            self._syncing_report_output_checks = False
+
+    def _checked_report_ids_from_right(self) -> list[int]:
+        report_ids: list[int] = []
+        for row in range(self.report_table.rowCount()):
+            checkbox = self._report_output_checkbox_for_row(row)
+            if checkbox is None or not checkbox.isChecked():
+                continue
+            id_item = self.report_table.item(row, 0)
+            if id_item is None:
+                continue
+            try:
+                report_ids.append(int(id_item.text()))
+            except ValueError:
+                continue
+        return report_ids
+
+    def _resize_report_number_column_to_contents(self) -> None:
+        column = 2
+        metrics = self.report_table.fontMetrics()
+        header_item = self.report_table.horizontalHeaderItem(column)
+        header_text = header_item.text() if header_item is not None else ""
+        width = metrics.horizontalAdvance(header_text) + 42
+        for row in range(self.report_table.rowCount()):
+            item = self.report_table.item(row, column)
+            if item is not None:
+                width = max(width, metrics.horizontalAdvance(item.text()) + 42)
+        self.report_table.setColumnWidth(column, max(260, width))
+
     def _show_project_list(self) -> None:
         self.current_project_id = None
         self.current_business_id = None
@@ -3633,7 +4196,7 @@ class MainWindow(QMainWindow):
         project_name = project["project_name"] if project is not None else "프로젝트"
         self._set_page_header(
             f"{business['business_name']} - 보고서 목록",
-            "선택한 사업의 보고서를 생성하고 조사 결과를 관리합니다.",
+            "선택한 사업의 보고서를 추가하고 조사 결과를 관리합니다.",
             [
                 "PIPE1",
                 project_name,
@@ -3642,26 +4205,33 @@ class MainWindow(QMainWindow):
         )
         rows = self.db.list_reports_with_counts(business_id)
         self.report_count_label.setText(f"총 {len(rows)}건")
-        self.report_table.setRowCount(len(rows))
-        for idx, row in enumerate(rows):
-            self._set_entity_table_row(
-                self.report_table,
-                idx,
-                int(row["id"]),
-                [
-                    row["report_number"],
-                    row["pipe_number"],
-                    row["survey_date"] or "",
-                    "" if row["length_m"] is None else f"{float(row['length_m']):.3f}",
-                    ""
-                    if row["total_drive_distance_m"] is None
-                    else f"{float(row['total_drive_distance_m']):.3f}",
-                    "완주" if row["is_completed"] else "미완주",
-                    "있음" if row["video_id"] is not None else "없음",
-                    row["defect_count"],
-                    row["version_count"],
-                ],
-            )
+        self._syncing_report_output_checks = True
+        try:
+            self.report_table.setRowCount(len(rows))
+            for idx, row in enumerate(rows):
+                self._set_report_table_row(
+                    idx,
+                    int(row["id"]),
+                    [
+                        row["report_number"],
+                        row["pipe_number"],
+                        row["survey_date"] or "",
+                        ""
+                        if row["length_m"] is None
+                        else f"{float(row['length_m']):.3f}",
+                        ""
+                        if row["total_drive_distance_m"] is None
+                        else f"{float(row['total_drive_distance_m']):.3f}",
+                        "완주" if row["is_completed"] else "미완주",
+                        "있음" if row["video_id"] is not None else "없음",
+                        row["defect_count"],
+                        row["version_count"],
+                    ],
+                )
+        finally:
+            self._syncing_report_output_checks = False
+        self._resize_report_number_column_to_contents()
+        self._sync_report_output_select_all_state()
         self.right_stack.setCurrentWidget(self.report_list_page)
 
     def _current_navigation_selection(self) -> tuple[str, int] | tuple[None, None]:
@@ -4213,6 +4783,16 @@ class MainWindow(QMainWindow):
         if report_id is not None:
             self._select_tree_entity("report", report_id)
 
+    def export_selected_report_from_right(self) -> None:
+        report_ids = self._checked_report_ids_from_right()
+        if not report_ids:
+            QMessageBox.information(self, "선택 필요", "출력할 보고서를 체크하세요")
+            return
+        self.open_report_export_dialog(
+            report_ids[0],
+            preselected_excel_report_ids=report_ids,
+        )
+
     def show_current_report_list_from_right(self) -> None:
         if self.current_business_id is not None:
             self._select_tree_entity("business", self.current_business_id)
@@ -4292,7 +4872,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "필수 업데이트",
-                "업데이트 설치 전까지 보고서 생성과 학습 업로드 기능이 제한됩니다.",
+                "업데이트 설치 전까지 보고서 출력과 학습 업로드 기능이 제한됩니다.",
             )
 
     def _download_and_install_update(self, info: UpdateInfo) -> None:
@@ -4911,7 +5491,11 @@ class MainWindow(QMainWindow):
         else:
             self.report_export_button.setToolTip("")
 
-    def _missing_report_export_requirements(self) -> list[str]:
+    def _missing_report_export_requirements(
+        self, report_id: int | None = None
+    ) -> list[str]:
+        if report_id is not None and report_id != self.current_report_id:
+            return self._missing_report_export_requirements_from_db(report_id)
         missing: list[str] = []
         for field, label in REPORT_EXPORT_REQUIRED_FIELDS:
             widget = self.report_inputs.get(field)
@@ -4923,14 +5507,32 @@ class MainWindow(QMainWindow):
             missing.append("총주행거리(m)")
         return missing
 
-    def _warn_missing_report_export_requirements(self) -> bool:
-        missing = self._missing_report_export_requirements()
+    def _missing_report_export_requirements_from_db(self, report_id: int) -> list[str]:
+        missing: list[str] = []
+        report = self.db.get_report(report_id)
+        if report is None:
+            return ["보고서 정보"]
+        for field, label in REPORT_EXPORT_REQUIRED_FIELDS:
+            value = report[field] if field in report.keys() else None
+            if value in (None, "") or not str(value).strip():
+                missing.append(label)
+        pipe_info = self.db.get_pipe_information(report_id)
+        if pipe_info is None or pipe_info["length_m"] is None:
+            missing.append("연장(m)")
+        if pipe_info is None or pipe_info["total_drive_distance_m"] is None:
+            missing.append("총주행거리(m)")
+        return missing
+
+    def _warn_missing_report_export_requirements(
+        self, report_id: int | None = None
+    ) -> bool:
+        missing = self._missing_report_export_requirements(report_id)
         if not missing:
             return False
         QMessageBox.warning(
             self,
-            "보고서 생성",
-            "보고서 생성을 위해 필수항목을 입력하세요:\n- "
+            "보고서 출력",
+            "보고서 출력을 위해 필수항목을 입력하세요:\n- "
             + "\n- ".join(missing),
         )
         return True
@@ -5509,8 +6111,10 @@ class MainWindow(QMainWindow):
                     row["drive_direction"],
                     "" if row["distance_m"] is None else f"{float(row['distance_m']):.3f}",
                     row["item_category"] or "",
-                    row["condition_item"] or "",
-                    row["defect_item"] or "",
+                    display_condition_item(
+                        row["item_category"] or "", row["condition_item"]
+                    ),
+                    display_defect_item(row["item_category"] or "", row["defect_item"]),
                     row["grade"] or "",
                     row["quadrant"] or "",
                     "" if row["manhole_defect_depth_m"] is None else f"{float(row['manhole_defect_depth_m']):.3f}",
@@ -6004,6 +6608,32 @@ class MainWindow(QMainWindow):
             return default_path
         return output_dir / default_path.name
 
+    def _business_excel_report_path(
+        self, context, report_kind: str, output_dir: Path
+    ) -> Path:
+        suffix = (
+            "단위구간보고서_내부결함판독표"
+            if report_kind == "internal_defect"
+            else "이상항목집계표"
+        )
+        filename = (
+            f"{context['business_code']}_{context['business_name']}_{suffix}.xlsx"
+        )
+        return output_dir / self.inspection.storage._sanitize(filename)
+
+    def _merged_pdf_report_path(
+        self, context, report_type: str, output_dir: Path
+    ) -> Path:
+        suffix = {
+            "inspection": "조사보고서",
+            "post_repair": "보수후보고서",
+            "comparison": "비교보고서",
+        }.get(report_type, "PDF보고서")
+        filename = (
+            f"{context['business_code']}_{context['business_name']}_{suffix}_통합.pdf"
+        )
+        return output_dir / self.inspection.storage._sanitize(filename)
+
     def _default_report_output_dir(self, report_id: int) -> Path | None:
         context = self.db.get_report_context(report_id)
         if context is None:
@@ -6019,11 +6649,11 @@ class MainWindow(QMainWindow):
 
     def _selected_output_dir(self, raw_path: str) -> Path | None:
         if not raw_path.strip():
-            QMessageBox.warning(self, "보고서 생성", "생성 경로를 입력하세요")
+            QMessageBox.warning(self, "보고서 출력", "출력 경로를 입력하세요")
             return None
         output_dir = Path(raw_path).expanduser()
         if output_dir.exists() and not output_dir.is_dir():
-            QMessageBox.warning(self, "보고서 생성", "생성 경로가 폴더가 아닙니다")
+            QMessageBox.warning(self, "보고서 출력", "출력 경로가 폴더가 아닙니다")
             return None
         return output_dir
 
@@ -6033,14 +6663,20 @@ class MainWindow(QMainWindow):
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def generate_excel_report(self, output_dir: Path | None = None) -> None:
+    def generate_excel_report(
+        self, report_id: int | None = None, output_dir: Path | None = None
+    ) -> None:
         if self._warn_if_mandatory_update_required():
             return
-        if self.current_report_id is None:
+        target_report_id = report_id if report_id is not None else self.current_report_id
+        if target_report_id is None:
             return
-        if not self._save_report_details_for_generation():
+        if (
+            target_report_id == self.current_report_id
+            and not self._save_report_details_for_generation()
+        ):
             return
-        context = self.db.get_report_context(self.current_report_id)
+        context = self.db.get_report_context(target_report_id)
         if context is None:
             return
         output_path = self._excel_report_path_for_context(context, output_dir)
@@ -6052,41 +6688,107 @@ class MainWindow(QMainWindow):
                 return
         try:
             report_path = self.inspection.generate_excel_report(
-                self.current_report_id, report_path=output_path
+                target_report_id, report_path=output_path
             )
         except Exception as exc:
             self.logger.exception("Excel report generation failed")
             QMessageBox.critical(self, "보고서 오류", str(exc))
             return
-        QMessageBox.information(self, "보고서", f"보고서가 생성되었습니다:\n{report_path}")
+        QMessageBox.information(self, "보고서", f"보고서가 출력되었습니다:\n{report_path}")
         self._open_generated_file(report_path)
 
-    def open_report_export_dialog(self) -> None:
+    def generate_business_excel_report(
+        self,
+        report_kind: str,
+        report_ids: list[int],
+        output_dir: Path,
+        base_report_id: int | None = None,
+        include_photos: bool = False,
+    ) -> None:
         if self._warn_if_mandatory_update_required():
             return
-        if self.current_report_id is None:
+        target_report_id = (
+            base_report_id if base_report_id is not None else self.current_report_id
+        )
+        if target_report_id is None:
             return
-        if self._warn_missing_report_export_requirements():
+        if not report_ids:
+            QMessageBox.warning(self, "보고서 출력", "출력할 보고서를 선택하세요")
             return
-        if not self._save_report_details_for_generation():
+        context = self.db.get_report_context(target_report_id)
+        if context is None:
+            QMessageBox.warning(self, "보고서 출력", "현재 보고서 정보를 찾을 수 없습니다")
             return
-        default_output_dir = self._default_report_output_dir(self.current_report_id)
-        context = self.db.get_report_context(self.current_report_id)
+        output_path = self._business_excel_report_path(context, report_kind, output_dir)
+        if output_path.exists():
+            overwrite = QMessageBox.question(
+                self,
+                "덮어쓰기 확인",
+                f"{output_path.name} 파일이 이미 있습니다. 덮어쓰시겠습니까?",
+            )
+            if overwrite != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            if report_kind == "internal_defect":
+                report_path = self.inspection.generate_internal_defect_workbook(
+                    report_ids, output_path, include_photos=include_photos
+                )
+            elif report_kind == "defect_aggregate":
+                report_path = self.inspection.generate_defect_aggregate_workbook(
+                    report_ids, output_path
+                )
+            else:
+                QMessageBox.warning(self, "보고서 출력", "알 수 없는 엑셀 보고서 종류입니다")
+                return
+        except Exception as exc:
+            self.logger.exception("Business Excel report generation failed")
+            QMessageBox.critical(self, "보고서 오류", str(exc))
+            return
+        QMessageBox.information(self, "보고서", f"보고서가 출력되었습니다:\n{report_path}")
+        self._open_generated_file(report_path)
+
+    def open_report_export_dialog(
+        self,
+        report_id: int | None = None,
+        *,
+        preselected_excel_report_ids: list[int] | None = None,
+    ) -> None:
+        if self._warn_if_mandatory_update_required():
+            return
+        target_report_id = report_id if report_id is not None else self.current_report_id
+        if target_report_id is None:
+            return
+        if self._warn_missing_report_export_requirements(target_report_id):
+            return
+        if (
+            target_report_id == self.current_report_id
+            and not self._save_report_details_for_generation()
+        ):
+            return
+        default_output_dir = self._default_report_output_dir(target_report_id)
+        context = self.db.get_report_context(target_report_id)
         if default_output_dir is None or context is None:
-            QMessageBox.warning(self, "보고서 생성", "현재 보고서 정보를 찾을 수 없습니다")
+            QMessageBox.warning(self, "보고서 출력", "현재 보고서 정보를 찾을 수 없습니다")
             return
         report_options = self._pdf_report_options()
         if not report_options:
             report_options = [self._pdf_report_option_from_context(context)]
         if not report_options:
-            QMessageBox.warning(self, "보고서 생성", "PDF 보고서 선택 목록을 만들 수 없습니다")
+            QMessageBox.warning(self, "보고서 출력", "PDF 보고서 선택 목록을 만들 수 없습니다")
             return
-        excel_filename = self._excel_report_path_for_context(context).name
+        excel_filename_examples = {
+            report_kind: self._business_excel_report_path(
+                context, report_kind, default_output_dir
+            ).name
+            for report_kind in ("internal_defect", "defect_aggregate")
+        }
         dialog = ReportExportDialog(
             report_options,
-            self.current_report_id,
+            target_report_id,
             str(default_output_dir),
-            excel_filename,
+            excel_filename_examples,
+            self._excel_report_options_for_current_business(),
+            preselected_excel_report_ids,
             self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -6095,7 +6797,14 @@ class MainWindow(QMainWindow):
         if output_dir is None:
             return
         if dialog.selected_export_kind() == "excel":
-            self.generate_excel_report(output_dir=output_dir)
+            excel_report_type = dialog.excel_report_type()
+            self.generate_business_excel_report(
+                excel_report_type,
+                dialog.selected_excel_report_ids(),
+                output_dir,
+                base_report_id=target_report_id,
+                include_photos=dialog.include_internal_defect_photos(),
+            )
             return
 
         report_type = dialog.pdf_report_type()
@@ -6117,10 +6826,21 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.generate_visual_pdf_report(
+        pdf_report_ids = preselected_excel_report_ids or [target_report_id]
+        for pdf_report_id in pdf_report_ids:
+            if self._warn_missing_report_export_requirements(pdf_report_id):
+                return
+        if len(pdf_report_ids) == 1:
+            self.generate_visual_pdf_report(
+                report_type=report_type,
+                before_report_id=pdf_report_ids[0],
+                after_report_id=None,
+                output_dir=output_dir,
+            )
+            return
+        self.generate_merged_pdf_report(
             report_type=report_type,
-            before_report_id=self.current_report_id,
-            after_report_id=None,
+            report_ids=pdf_report_ids,
             output_dir=output_dir,
         )
 
@@ -6164,11 +6884,11 @@ class MainWindow(QMainWindow):
         try:
             self.save_report_details_without_message()
         except ValueError as exc:
-            QMessageBox.warning(self, "보고서 생성", str(exc))
+            QMessageBox.warning(self, "보고서 출력", str(exc))
             return False
         except Exception as exc:
             self.logger.exception("Failed to save report before generation")
-            QMessageBox.critical(self, "보고서 생성", str(exc))
+            QMessageBox.critical(self, "보고서 출력", str(exc))
             return False
         return True
 
@@ -6195,6 +6915,28 @@ class MainWindow(QMainWindow):
             context = self.db.get_report_context(self.current_report_id)
             if context is not None:
                 options.append(self._pdf_report_option_from_context(context))
+        return options
+
+    def _excel_report_options_for_current_business(self) -> list[tuple[int, str]]:
+        if self.current_business_id is None:
+            return []
+        options: list[tuple[int, str]] = []
+        rows = sorted(
+            self.db.list_reports(self.current_business_id),
+            key=lambda row: (
+                str(row["report_number"] or ""),
+                str(row["pipe_number"] or ""),
+                int(row["id"]),
+            ),
+        )
+        for row in rows:
+            version_name = row["version_name"] or f"v{row['version_number']}"
+            options.append(
+                (
+                    int(row["id"]),
+                    f"{row['report_number']} / {row['pipe_number']} > {version_name}",
+                )
+            )
         return options
 
     @staticmethod
@@ -6296,25 +7038,88 @@ class MainWindow(QMainWindow):
             )
         return defects, max_distance_m
 
+    def _merge_pdf_files(self, source_paths: list[Path], output_path: Path) -> Path:
+        from pypdf import PdfReader, PdfWriter
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = PdfWriter()
+        for source_path in source_paths:
+            reader = PdfReader(str(source_path))
+            for page in reader.pages:
+                writer.add_page(page)
+        with output_path.open("wb") as output_file:
+            writer.write(output_file)
+        return output_path
+
+    def generate_merged_pdf_report(
+        self,
+        report_type: str,
+        report_ids: list[int],
+        output_dir: Path,
+    ) -> None:
+        if self._warn_if_mandatory_update_required():
+            return
+        if not report_ids:
+            QMessageBox.warning(self, "PDF 보고서", "출력할 보고서를 선택하세요")
+            return
+        context = self.db.get_report_context(report_ids[0])
+        if context is None:
+            QMessageBox.warning(self, "PDF 보고서", "현재 보고서 정보를 찾을 수 없습니다")
+            return
+        output_path = self._merged_pdf_report_path(context, report_type, output_dir)
+        try:
+            with TemporaryDirectory(prefix="pipe1_pdf_merge_") as temp_dir_name:
+                temp_dir = Path(temp_dir_name)
+                source_paths: list[Path] = []
+                for report_id in report_ids:
+                    report_temp_dir = temp_dir / str(report_id)
+                    pdf_path = self.generate_visual_pdf_report(
+                        report_type=report_type,
+                        before_report_id=report_id,
+                        after_report_id=None,
+                        output_dir=report_temp_dir,
+                        show_success_message=False,
+                        open_after_output=False,
+                    )
+                    if pdf_path is None:
+                        return
+                    source_paths.append(pdf_path)
+                merged_path = self._merge_pdf_files(source_paths, output_path)
+        except Exception as exc:
+            self.logger.exception("PDF report merge failed")
+            QMessageBox.critical(self, "PDF 보고서 오류", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "PDF 보고서",
+            f"PDF 보고서 {len(report_ids)}개가 하나의 파일로 출력되었습니다:\n{merged_path}",
+        )
+        self._open_generated_file(merged_path)
+
     def generate_visual_pdf_report(
         self,
         report_type: str = "inspection",
         before_report_id: int | None = None,
         after_report_id: int | None = None,
         output_dir: Path | None = None,
-    ) -> None:
+        show_success_message: bool = True,
+        open_after_output: bool = True,
+    ) -> Path | None:
         if self._warn_if_mandatory_update_required():
-            return
-        if self.current_report_id is None:
-            return
-        if not self._save_report_details_for_generation():
-            return
+            return None
         if before_report_id is None:
             before_report_id = self.current_report_id
+        if before_report_id is None:
+            return None
+        if (
+            before_report_id == self.current_report_id
+            and not self._save_report_details_for_generation()
+        ):
+            return None
         is_comparison = report_type == "comparison"
         if is_comparison and after_report_id is None:
             QMessageBox.warning(self, "PDF 보고서", "비교할 보수후 보고서를 선택하세요.")
-            return
+            return None
 
         if is_comparison and after_report_id is not None:
             mismatches = self._pdf_after_report_mismatches(
@@ -6332,18 +7137,18 @@ class MainWindow(QMainWindow):
                         f"{mismatch_preview}"
                     ),
                 )
-                return
+                return None
         context = self.db.get_report_context(before_report_id)
         pipe_info = self.db.get_pipe_information(before_report_id)
         if context is None or pipe_info is None:
-            return
+            return None
         upstream = self.db.get_manhole(before_report_id, "upstream")
         downstream = self.db.get_manhole(before_report_id, "downstream")
         actual = self.db.get_actual_survey(before_report_id)
         pipe_png_path = self._resolve_default_pipe_png_path()
         if pipe_png_path is None:
             QMessageBox.warning(self, "PDF 보고서", "pipe.png 템플릿 파일을 찾을 수 없습니다")
-            return
+            return None
         defects_before, before_max_distance_m = self._pdf_defect_payload(
             before_report_id
         )
@@ -6387,9 +7192,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.logger.exception("PDF report generation failed")
             QMessageBox.critical(self, "PDF 보고서 오류", str(exc))
-            return
-        QMessageBox.information(self, "PDF 보고서", f"PDF 보고서가 생성되었습니다:\n{pdf_path}")
-        self._open_generated_file(pdf_path)
+            return None
+        pdf_path = Path(pdf_path)
+        if show_success_message:
+            QMessageBox.information(
+                self, "PDF 보고서", f"PDF 보고서가 출력되었습니다:\n{pdf_path}"
+            )
+        if open_after_output:
+            self._open_generated_file(pdf_path)
+        return pdf_path
 
 
 class LeftNavigationPanel(QWidget):
