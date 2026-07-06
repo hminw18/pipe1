@@ -409,7 +409,7 @@ class SettingsDialog(QDialog):
         app_version = (
             self.license_config.app_version
             if self.license_config is not None
-            else "0.1.1"
+            else "0.1.2"
         )
         self.db.set_training_upload_consent(
             license_id=license_id,

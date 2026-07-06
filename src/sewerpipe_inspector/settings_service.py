@@ -15,6 +15,7 @@ class AppSettings:
     always_show_directory_picker: bool = False
     report_view_scale: float = 1.0
     developer_mode: bool = False
+    suppressed_update_prompt_version: str | None = None
 
 
 def load_settings() -> AppSettings:
@@ -39,12 +40,16 @@ def load_settings() -> AppSettings:
     if not 0.8 <= report_view_scale <= 1.2:
         report_view_scale = 1.0
     developer_mode = bool(raw.get("developer_mode", False))
+    suppressed_update_prompt_version = raw.get("suppressed_update_prompt_version")
+    if not isinstance(suppressed_update_prompt_version, str):
+        suppressed_update_prompt_version = None
     return AppSettings(
         default_workspace=default_workspace,
         suppress_default_workspace_prompt=suppress_prompt,
         always_show_directory_picker=always_show_picker,
         report_view_scale=report_view_scale,
         developer_mode=developer_mode,
+        suppressed_update_prompt_version=suppressed_update_prompt_version,
     )
 
 
@@ -55,6 +60,7 @@ def save_settings(settings: AppSettings) -> None:
         "always_show_directory_picker": settings.always_show_directory_picker,
         "report_view_scale": settings.report_view_scale,
         "developer_mode": settings.developer_mode,
+        "suppressed_update_prompt_version": settings.suppressed_update_prompt_version,
     }
     SETTINGS_PATH.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

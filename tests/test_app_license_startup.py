@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QDialog
 from sewerpipe_inspector import app as app_module
 from sewerpipe_inspector.licensing.config import LicenseRuntimeConfig
 from sewerpipe_inspector.licensing.license_service import LicenseStatus
+from sewerpipe_inspector.settings_service import AppSettings
 
 
 class _InactiveLicenseService:
@@ -95,15 +96,57 @@ class _Window:
         self.status_bar = _StatusBar()
         self.closed = False
         self.enabled_values: list[bool] = []
+        self.update_info = None
+        self.prompt_update_calls: list[tuple[object, bool, bool]] = []
+        self.mandatory_update_calls: list[object] = []
 
     def statusBar(self) -> _StatusBar:
         return self.status_bar
+
+    def set_update_info(self, info: object) -> None:
+        self.update_info = info
+
+    def prompt_update(
+        self,
+        info: object,
+        *,
+        mandatory: bool = False,
+        allow_suppress: bool = False,
+    ) -> None:
+        self.prompt_update_calls.append((info, mandatory, allow_suppress))
+
+    def start_mandatory_update(self, info: object) -> None:
+        self.mandatory_update_calls.append(info)
 
     def setEnabled(self, enabled: bool) -> None:
         self.enabled_values.append(enabled)
 
     def close(self) -> None:
         self.closed = True
+
+
+def _update_info(
+    *,
+    latest_version: str = "0.1.1",
+    mandatory: bool = False,
+) -> app_module.UpdateInfo:
+    return app_module.UpdateInfo(
+        update_available=True,
+        current_version="0.1.0",
+        latest_version=latest_version,
+        mandatory=mandatory,
+        min_supported_version=None,
+        download_url=f"https://pipe1dev.cloud/downloads/PIPE1-{latest_version}.msi",
+        sha256="a" * 64,
+        size_bytes=123,
+        release_notes=None,
+        published_at="2026-06-29T00:00:00Z",
+    )
+
+
+def _dispatch_update_check(window: _Window, info: app_module.UpdateInfo) -> None:
+    handler = type("Handler", (), {"window": window})()
+    app_module._UpdateCheckHandler.on_succeeded(handler, info)
 
 
 def test_dev_mode_does_not_prompt_for_activation_when_server_is_configured(
@@ -213,3 +256,50 @@ def test_background_validation_failure_exit_when_reactivation_is_cancelled(
         "라이선스가 갱신되지 않았습니다" in message
         for message, _ in window.status_bar.messages
     )
+
+
+def test_optional_startup_update_prompts_when_not_suppressed(monkeypatch) -> None:
+    window = _Window()
+    info = _update_info(mandatory=False)
+    monkeypatch.setattr(app_module, "load_settings", lambda: AppSettings())
+
+    _dispatch_update_check(window, info)
+
+    assert window.update_info is info
+    assert window.prompt_update_calls == [(info, False, True)]
+    assert window.mandatory_update_calls == []
+
+
+def test_optional_startup_update_does_not_prompt_for_suppressed_version(
+    monkeypatch,
+) -> None:
+    window = _Window()
+    info = _update_info(latest_version="0.1.1", mandatory=False)
+    monkeypatch.setattr(
+        app_module,
+        "load_settings",
+        lambda: AppSettings(suppressed_update_prompt_version="0.1.1"),
+    )
+
+    _dispatch_update_check(window, info)
+
+    assert window.update_info is info
+    assert window.prompt_update_calls == []
+    assert window.mandatory_update_calls == []
+    assert window.status_bar.messages
+
+
+def test_optional_startup_update_prompts_again_for_next_version(monkeypatch) -> None:
+    window = _Window()
+    info = _update_info(latest_version="0.1.2", mandatory=False)
+    monkeypatch.setattr(
+        app_module,
+        "load_settings",
+        lambda: AppSettings(suppressed_update_prompt_version="0.1.1"),
+    )
+
+    _dispatch_update_check(window, info)
+
+    assert window.update_info is info
+    assert window.prompt_update_calls == [(info, False, True)]
+    assert window.mandatory_update_calls == []

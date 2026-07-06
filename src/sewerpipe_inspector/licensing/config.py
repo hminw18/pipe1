@@ -125,7 +125,7 @@ def load_license_runtime_config(
         api_base_url=values.get("PIPE1_LICENSE_API_BASE_URL"),
         public_keys=public_keys,
         app_env=app_env,
-        app_version=values.get("PIPE1_APP_VERSION", "0.1.1"),
+        app_version=values.get("PIPE1_APP_VERSION", "0.1.2"),
         state_dir=Path(state_dir_raw) if state_dir_raw else default_license_state_dir(),
         require_activation=app_env in {"prod", "production"}
         or explicit_require_activation,

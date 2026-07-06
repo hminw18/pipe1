@@ -89,7 +89,7 @@ def run_msiexec(msi_path: Path, log_path: Path) -> int:
     args = [
         "/i",
         str(msi_path),
-        "/quiet",
+        "/passive",
         "/norestart",
         "/L*v",
         str(log_path),
@@ -146,7 +146,7 @@ def _run_windows_msiexec_elevated(args: list[str]) -> int:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     see_mask_nocloseprocess = 0x00000040
     infinite = 0xFFFFFFFF
-    show_hidden = 0
+    show_default = 1
     params = subprocess.list2cmdline(args)
     info = ShellExecuteInfo()
     info.cbSize = ctypes.sizeof(ShellExecuteInfo)
@@ -154,7 +154,7 @@ def _run_windows_msiexec_elevated(args: list[str]) -> int:
     info.lpVerb = "runas"
     info.lpFile = "msiexec.exe"
     info.lpParameters = params
-    info.nShow = show_hidden
+    info.nShow = show_default
 
     if not shell32.ShellExecuteExW(ctypes.byref(info)):
         raise ctypes.WinError(ctypes.get_last_error())

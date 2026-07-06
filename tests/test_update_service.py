@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from sewerpipe_inspector.updates.api_client import UpdateConnectionError
+from sewerpipe_inspector.updates import installer_helper
 from sewerpipe_inspector.updates.models import UpdateInfo
 from sewerpipe_inspector.updates.update_service import UpdateSecurityError, UpdateService
 
@@ -157,3 +158,33 @@ def test_update_service_launches_installer_helper(monkeypatch, tmp_path: Path) -
     assert "--result" in args
     assert str(service.installer_result_path(msi_path)) in args
     assert "--show-failure-dialog" in args
+
+
+def test_installer_helper_uses_passive_msiexec_ui(monkeypatch, tmp_path: Path) -> None:
+    msi_path = tmp_path / "PIPE1-0.1.1.msi"
+    log_path = tmp_path / "PIPE1-0.1.1.install.log"
+    msi_path.write_bytes(b"msi")
+    calls: list[list[str]] = []
+
+    def fake_run_windows_msiexec_elevated(args: list[str]) -> int:
+        calls.append(args)
+        return 0
+
+    monkeypatch.setattr(
+        installer_helper,
+        "_run_windows_msiexec_elevated",
+        fake_run_windows_msiexec_elevated,
+    )
+    monkeypatch.setattr(installer_helper.os, "name", "nt")
+
+    assert installer_helper.run_msiexec(msi_path, log_path) == 0
+    assert calls == [
+        [
+            "/i",
+            str(msi_path),
+            "/passive",
+            "/norestart",
+            "/L*v",
+            str(log_path),
+        ]
+    ]

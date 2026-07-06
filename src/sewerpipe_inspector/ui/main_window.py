@@ -4902,32 +4902,64 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         if self._mandatory_update_blocks_production():
             self.inspection.training_upload_service = None
 
-    def prompt_update(self, info: UpdateInfo, *, mandatory: bool = False) -> None:
+    def start_mandatory_update(self, info: UpdateInfo) -> None:
         self.set_update_info(info)
         if not info.update_available:
             return
-        title = "필수 업데이트" if mandatory else "업데이트"
+        self.statusBar().showMessage("필수 업데이트를 설치합니다...")
+        self._download_and_install_update(info)
+
+    def prompt_update(
+        self,
+        info: UpdateInfo,
+        *,
+        mandatory: bool = False,
+        allow_suppress: bool = False,
+    ) -> None:
+        self.set_update_info(info)
+        if not info.update_available:
+            return
+        if mandatory:
+            self.start_mandatory_update(info)
+            return
         version = info.latest_version or "새 버전"
-        message = f"PIPE1 {version} 업데이트를 설치해야 합니다."
+        message = f"PIPE1 {version} 업데이트가 있습니다."
         if info.release_notes:
             message += f"\n\n{info.release_notes}"
         message += "\n\n지금 다운로드하고 설치할까요?"
-        result = QMessageBox.question(
-            self,
-            title,
-            message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes if mandatory else QMessageBox.StandardButton.No,
-        )
-        if result == QMessageBox.StandardButton.Yes:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("업데이트")
+        box.setText(message)
+        install_button = box.addButton("설치", QMessageBox.ButtonRole.AcceptRole)
+        later_button = box.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
+        suppress_checkbox: QCheckBox | None = None
+        if allow_suppress and info.latest_version:
+            suppress_checkbox = QCheckBox("이 버전은 다시 묻지 않기", box)
+            box.setCheckBox(suppress_checkbox)
+        box.setDefaultButton(install_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == install_button:
+            settings = load_settings()
+            if settings.suppressed_update_prompt_version == info.latest_version:
+                settings.suppressed_update_prompt_version = None
+                save_settings(settings)
             self._download_and_install_update(info)
             return
-        if mandatory:
-            QMessageBox.warning(
-                self,
-                "필수 업데이트",
-                "업데이트 설치 전까지 보고서 출력과 학습 업로드 기능이 제한됩니다.",
-            )
+        if (
+            clicked == later_button
+            and suppress_checkbox is not None
+            and suppress_checkbox.isChecked()
+            and info.latest_version
+        ):
+            settings = load_settings()
+            settings.suppressed_update_prompt_version = info.latest_version
+            save_settings(settings)
+        self.statusBar().showMessage(
+            "설정에서 업데이트를 설치할 수 있습니다.",
+            15000,
+        )
 
     def _start_update_install_worker(self, info: UpdateInfo) -> bool:
         if self.update_service is None:
