@@ -119,7 +119,12 @@ class _UpdateCheckHandler(QObject):
         if not info.update_available:
             return
         if info.mandatory:
-            self.window.prompt_update(info, mandatory=True)
+            self.window.start_mandatory_update(info)
+            return
+        latest_version = info.latest_version or ""
+        settings = load_settings()
+        if settings.suppressed_update_prompt_version != latest_version:
+            self.window.prompt_update(info, mandatory=False, allow_suppress=True)
             return
         latest = info.latest_version or "새 버전"
         self.window.statusBar().showMessage(
