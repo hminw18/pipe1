@@ -1,15 +1,9 @@
 # Pipe1
 
-desktop application for sewer/manhole CCTV review, report-level video inspection, defect capture, and report generation.
+하수관로 CCTV 영상의 결함 탐지를 AI를 통해 자동화하는 end-to-end 소프트웨어
 
 ## Run
 
 ```bash
 python -m sewerpipe_inspector
 ```
-
-## Project Structure
-
-- `docs/Requirement_Definition.md`: current requirement definition for Project/Business/Report navigation
-- `src/sewerpipe_inspector`: application source
-- `tests`: unit tests for core services
