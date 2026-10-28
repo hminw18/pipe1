@@ -65,7 +65,10 @@ Display rules:
 - Project list item label: `{project_name}`
 - Business list item label: `{business_code} - {business_name}`
 - Report list item label: `{report_number} / {pipe_number}`
-- The UI visually follows a SaaS-style admin console for the `Pipe1` brand: dark navy sidebar, page title area, breadcrumb trail, modern tables, and clear CTA hierarchy.
+- The UI is a dense, flat tool for daily expert use, not a marketing-style dashboard: hairline rules and tables instead of cards, 2px corner radius, no shadows or gradients, 13px base text.
+- Brand: the `Pipe1` mark (two overlapping circles) and its colours, `#3851F8` for primary actions, selection and the playhead, and `#89ABFF` for highlights such as stop segments. Everything else is neutral grey.
+- Type: Pretendard for text (Korean and Latin) and JetBrains Mono for numbers, codes, timestamps and IDs. Both are SIL OFL fonts.
+- Layout (web): top bar with mark, breadcrumb trail and account links; light sidebar listing projects, businesses and reports with counts; content area. Row actions in tables are text links shown on hover or selection; keyboard shortcuts are shown next to the controls they trigger.
 - Project, Business, and Report occupy separate boxed sections, not horizontal table columns and not only indented tree rows.
 - Items inside each Project/Business/Report section are shown as bullet-style list entries, not boxed item cards.
 - Videos do not appear in the navigation.
@@ -463,7 +466,7 @@ Rules:
 
 - Video playback is available only when a Report is selected.
 - One Report can have only one active video.
-- Timeline markers show captured defects.
+- Timeline markers show captured defects. On the web a marker's height shows its grade (대 full, 중 two thirds, 소 one third); grades are never shown by colour.
 - Stop-segment markers may be shown separately when stop detection is used.
 
 ### 6.4 Defect Registration
@@ -528,7 +531,7 @@ Workbook reflects:
 - Actual survey information table
 - Detailed defect list
 - Defect image thumbnails
-- Grade color coding for `대/중/소`
+- Grades `대/중/소` as plain text, without colour coding
 
 Workbook sheet layout:
 
@@ -543,7 +546,6 @@ Workbook sheet layout:
 3. `결함목록`
    - Detailed defect list table
    - Defect image thumbnails
-   - Grade color coding for `대/중/소`
 
 The video information table does not need to be exported unless explicitly requested later.
 

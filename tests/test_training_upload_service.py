@@ -6,7 +6,7 @@ from typing import Any
 
 from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, MANHOLE_FIELDS, REPORT_FIELDS, Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.report_service import ReportService
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 from sewerpipe_inspector.services.training_upload_service import TrainingUploadService
 

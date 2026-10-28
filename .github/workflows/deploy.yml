@@ -1,0 +1,61 @@
+# Build and deploy the dev environment from main (docs/Web_Architecture.md §3, CI/CD).
+# Authenticates with Workload Identity Federation (no service-account keys). Requires repo
+# variables GCP_PROJECT, GCP_REGION, WIF_PROVIDER, DEPLOYER_SERVICE_ACCOUNT, created from the
+# Terraform outputs. Disabled until DEPLOY_ENABLED is set to "true".
+name: deploy
+
+on:
+  workflow_run:
+    workflows: [ci]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event.workflow_run.conclusion == 'success' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION }}
+      REPOSITORY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/pipe1-dev
+      TAG: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOYER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Build images (Cloud Build)
+        run: gcloud builds submit --project "$PROJECT" --region "$REGION" --config server/cloudbuild.yaml --substitutions "_REPOSITORY=$REPOSITORY,_TAG=$TAG" .
+      - name: Migrate database
+        run: |
+          gcloud run jobs update pipe1-dev-migrate --project "$PROJECT" --region "$REGION" --image "$REPOSITORY/api@$(gcloud artifacts docker images describe "$REPOSITORY/api:$TAG" --format='value(image_summary.digest)')"
+          gcloud run jobs execute pipe1-dev-migrate --project "$PROJECT" --region "$REGION" --wait
+      - name: Deploy services (by digest)
+        run: |
+          digest() { gcloud artifacts docker images describe "$REPOSITORY/$1:$TAG" --format='value(image_summary.digest)'; }
+          WORKER="$REPOSITORY/worker@$(digest worker)"
+          gcloud run deploy pipe1-dev-worker --project "$PROJECT" --region "$REGION" --image "$WORKER"
+          gcloud run deploy pipe1-dev-mailer --project "$PROJECT" --region "$REGION" --image "$WORKER"
+          gcloud run deploy pipe1-dev-api --project "$PROJECT" --region "$REGION" --image "$REPOSITORY/api@$(digest api)"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Publish frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+          gcloud storage rsync dist "gs://$PROJECT-pipe1-dev-web" --recursive --delete-unmatched-destination-objects
+          gcloud storage objects update "gs://$PROJECT-pipe1-dev-web/index.html" --cache-control="no-store"

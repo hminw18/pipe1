@@ -3,11 +3,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from sewerpipe_inspector.stop_detection import (
+from pipe1_core.stop_detection import (
     StopFrameCandidateDetectionConfig,
     StopFrameCandidateDetector,
 )
-from sewerpipe_inspector.stop_detection.frame_candidate_detector import MotionSample
+from pipe1_core.stop_detection.frame_candidate_detector import MotionSample
 
 
 def _frame_with_shape(x: int, label: str = "") -> np.ndarray:

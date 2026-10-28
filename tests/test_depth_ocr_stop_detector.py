@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from sewerpipe_inspector.stop_detection.depth_ocr_detector import (
+from pipe1_core.stop_detection.depth_ocr_detector import (
     DepthOcrStopDetectionConfig,
     DepthOcrStopSegmentDetector,
     DepthSample,

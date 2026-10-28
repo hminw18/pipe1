@@ -1,0 +1,19 @@
+# Only core/, server/, and the report assets go into images.
+**/.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+.git
+.local-storage
+server/.local-storage
+server/.env
+web/
+src/
+tests/
+packaging/
+scripts/
+infra/
+config/
+docs/
+*.db

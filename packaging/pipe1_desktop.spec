@@ -44,7 +44,7 @@ def _datas() -> list[tuple[str, str]]:
 
 a = Analysis(
     [str(ROOT / "packaging" / "pyinstaller_entry.py")],
-    pathex=[str(ROOT / "src")],
+    pathex=[str(ROOT / "src"), str(ROOT / "core" / "src")],
     binaries=[],
     datas=_datas(),
     hiddenimports=[],

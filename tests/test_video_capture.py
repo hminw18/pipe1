@@ -2,7 +2,7 @@ import sys
 
 import cv2
 
-from sewerpipe_inspector.stop_detection.video_capture import open_analysis_video_capture
+from pipe1_core.stop_detection.video_capture import open_analysis_video_capture
 
 
 class FakeCapture:

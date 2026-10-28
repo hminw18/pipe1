@@ -4,7 +4,7 @@ import numpy as np
 
 from sewerpipe_inspector.db import Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.report_service import ReportService
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 
 
@@ -52,3 +52,17 @@ def test_capture_save_uses_unicode_safe_file_write(tmp_path: Path, monkeypatch) 
     assert capture_path.exists()
     assert "프로젝트" in str(capture_path)
     assert capture_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_two_captures_of_the_same_frame_get_separate_files(tmp_path: Path) -> None:
+    storage = StorageService(tmp_path)
+    kwargs = dict(
+        project_name="P",
+        business_code="B",
+        business_name="N",
+        report_number="R",
+        pipe_number="X",
+        video_filename="video.mp4",
+        timestamp_ms=1234,
+    )
+    assert storage.capture_path(**kwargs) != storage.capture_path(**kwargs)

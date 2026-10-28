@@ -22,6 +22,24 @@ pytest tests/test_db.py::test_name       # single test
 pyright                                  # type check (config in pyrightconfig.json, basic mode)
 ```
 
+Repository layout: `src/sewerpipe_inspector/` (desktop, Qt), `core/` (`pipe1_core`: Qt-free defect taxonomy, grading, stop detection, Excel/PDF; used by both apps), `server/` (web API and worker), `web/` (React frontend), `infra/terraform/` (GCP). The desktop's pytest config covers `src` and `core/src`.
+
+Web backend (`server/`, Python 3.12 via uv; details in `server/README.md`):
+
+```bash
+cd server && uv sync
+uv run pytest                                   # DB tests need PIPE1_TEST_ADMIN_URL (Postgres superuser URL), else skipped
+uv run pytest tests/test_row_level_security.py::test_name
+uv run ruff check . && uv run ruff format --check .
+uv run alembic check                            # models and migrations agree
+```
+
+Server essentials: the app connects as `pipe1_app` (not the table owner), and every transaction must call `pipe1_server.db.set_access_context()`; PostgreSQL row-level security on `inspection_projects` and all tables below it enforces the permission matrix in `docs/Web_Auth_Spec.md` §2. Every route loads its target through `security/authorization.authorize()`. Every table under a project carries `project_id`, tied to its parent by a composite foreign key. Generate migrations with `alembic revision --autogenerate`, then add RLS policies and grants for new tables by hand (see `migrations/versions/0001_initial_schema.py`). Use `db.after_commit()`, never FastAPI `BackgroundTasks`, for work that must follow the commit (jobs, emails, file deletes): background tasks run before the commit. Media (ffmpeg/OpenCV) runs only in the worker (`pipe1_server.worker`) in production.
+
+Frontend (`web/`, Node 24): `npm ci`, `npm run dev` (proxies `/api` to localhost:8000), `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`. After changing the API, regenerate types with `npm run api:types`. The CSP forbids inline styles and scripts: set dynamic positions through `element.style`, never `style` attributes in HTML or `<style>` blocks.
+
+Infrastructure (`infra/terraform/`): `terraform init -backend-config=envs/dev.backend.hcl`, then `terraform plan -var-file=envs/dev.tfvars`. `apply` creates billed GCP resources; ask before running it. CI and deploy workflows are in `.github/workflows/`.
+
 Windows packaging (PowerShell): `scripts/build_windows.ps1` (PyInstaller via `packaging/pipe1_desktop.spec`, runs tests unless `-SkipTests`) and `scripts/build_msi.ps1` (WiX, `packaging/wix/*.wxs`). Builds require a production `config/pipe1.client.env` (`PIPE1_APP_ENV=prod`, https license API URL, non-empty public keys) unless `-UseExampleConfig`.
 
 The version `0.1.2` is hardcoded in several places (pyproject.toml, `licensing/config.py` default, update/training services, UI, tests) — grep for it when bumping.

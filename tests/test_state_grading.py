@@ -1,4 +1,4 @@
-from sewerpipe_inspector.state_grading import (
+from pipe1_core.state_grading import (
     compute_pipe_state_grades,
     format_state_value,
     grade_from_score,

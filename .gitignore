@@ -27,3 +27,17 @@ captures/
 exports/
 
 config/pipe1.client.env
+
+.env
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Web build and generated intermediates
+web/node_modules/
+web/dist/
+web/openapi.json
+.local-storage/
+server/.local-storage/
+
+deploy/dev-vm/.env

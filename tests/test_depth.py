@@ -5,8 +5,8 @@ import numpy as np
 
 from sewerpipe_inspector.db import Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.ocr_service import OCRService
-from sewerpipe_inspector.services.report_service import ReportService
+from pipe1_core.services.ocr_service import OCRService
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 
 class FakeDepthMatcher:

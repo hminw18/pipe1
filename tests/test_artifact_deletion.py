@@ -2,7 +2,7 @@ from pathlib import Path
 
 from sewerpipe_inspector.db import Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.report_service import ReportService
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 
 

@@ -12,7 +12,7 @@ from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
 from sewerpipe_inspector.licensing.errors import LicenseConfigurationError
 from sewerpipe_inspector.licensing.license_service import LicenseService
 from sewerpipe_inspector.licensing.local_store import LocalLicenseStore
-from sewerpipe_inspector.resources import resource_path_candidates
+from pipe1_core.resources import resource_path_candidates
 from sewerpipe_inspector.updates.api_client import HttpUpdateApiClient
 from sewerpipe_inspector.updates.update_service import UpdateService
 

@@ -1,0 +1,11 @@
+# Builds the API and worker images from the repository root (see server/Dockerfile).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, server/Dockerfile, --target, api, -t, "${_REPOSITORY}/api:${_TAG}", .]
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, server/Dockerfile, --target, worker, -t, "${_REPOSITORY}/worker:${_TAG}", .]
+images:
+  - "${_REPOSITORY}/api:${_TAG}"
+  - "${_REPOSITORY}/worker:${_TAG}"
+options:
+  logging: CLOUD_LOGGING_ONLY

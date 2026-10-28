@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import uuid
 from pathlib import Path
 
 
@@ -110,7 +111,9 @@ class StorageService:
             version_name,
         )
         stem = Path(video_filename).stem
-        return captures / f"{self._sanitize(stem)}_{timestamp_ms}.png"
+        # A unique suffix: two defects captured from the same frame must never share one
+        # file, or deleting one defect would delete the other's image.
+        return captures / f"{self._sanitize(stem)}_{timestamp_ms}_{uuid.uuid4().hex[:12]}.png"
 
     def excel_report_path(
         self,

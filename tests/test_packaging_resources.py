@@ -4,7 +4,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from sewerpipe_inspector import resources
+from pipe1_core import resources
 from sewerpipe_inspector.licensing import config as license_config
 
 

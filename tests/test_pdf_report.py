@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image as PILImage
 
-from sewerpipe_inspector.services.pdf_report_service import (
+from pipe1_core.services.pdf_report_service import (
     _connection_line_layout,
     _defect_caption,
     _paginate_comparison_layouts,

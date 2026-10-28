@@ -1,4 +1,4 @@
-from sewerpipe_inspector.defect_taxonomy import (
+from pipe1_core.defect_taxonomy import (
     condition_items_for_category,
     condition_code,
     defect_code,

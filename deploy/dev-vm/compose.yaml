@@ -1,0 +1,87 @@
+# Dev/test environment on a single VM: https://pipe1dev.cloud
+# Not the production architecture (docs/Web_Architecture.md): everything runs in one app
+# container (jobs, media processing and email inline; emails go to the log).
+#
+#   ./setup.sh                 # once: generates .env with random secrets
+#   docker compose up -d --build
+#   docker compose logs -f app
+name: pipe1-dev
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 30
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+      target: worker
+    env_file: .env
+    environment:
+      PIPE1_MIGRATION_DATABASE_URL: postgresql+psycopg://pipe1_migrator@postgres/pipe1
+      PGPASSWORD: ${PIPE1_MIGRATOR_DB_PASSWORD}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+      target: worker  # includes ffmpeg: media is processed in-process in this environment
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PIPE1_ENVIRONMENT: dev
+      PIPE1_APP_ORIGIN: https://pipe1dev.cloud
+      PIPE1_PUBLIC_API_ORIGIN: https://pipe1dev.cloud
+      PIPE1_DATABASE_URL: postgresql+psycopg://pipe1_app@postgres/pipe1
+      PGPASSWORD: ${PIPE1_APP_DB_PASSWORD}
+      PIPE1_STORAGE_BACKEND: local
+      PIPE1_LOCAL_STORAGE_DIR: /data/storage
+      PIPE1_JOB_QUEUE: inline
+      PIPE1_MEDIA_CLIENT: local
+      PIPE1_EMAIL_QUEUE: inline
+      PIPE1_EMAIL_SENDER: console
+      PIPE1_BREACHED_PASSWORD_SOURCE: hibp
+      # Caddy appends the client address to X-Forwarded-For.
+      PIPE1_TRUSTED_PROXY_HOPS: "1"
+    command: ["uvicorn", "pipe1_server.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
+    volumes:
+      - storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../../web/dist:/srv/web:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  storage:
+  caddy_data:
+  caddy_config:

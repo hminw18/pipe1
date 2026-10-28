@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Optional
 import cv2
 
 from sewerpipe_inspector.db import Database
-from sewerpipe_inspector.services.ocr_service import OCRService
-from sewerpipe_inspector.services.report_service import DefectReportRow, ReportService
+from pipe1_core.services.ocr_service import OCRService
+from pipe1_core.services.report_service import DefectReportRow, ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 
 if TYPE_CHECKING:
@@ -74,6 +74,13 @@ class InspectionService:
         if video_row is None or int(video_row["report_id"]) != report_id:
             raise ValueError("Invalid report video")
 
+        # Validate before writing anything, so a rejected capture leaves no orphan image.
+        resolved_distance = distance_m
+        if resolved_distance is None:
+            resolved_distance = self._extract_distance(video_row, frame)
+        if resolved_distance is None:
+            raise ValueError("distance_m is required")
+
         capture_path = self.storage.capture_path(
             project_name=context["project_name"],
             business_code=context["business_code"],
@@ -88,12 +95,6 @@ class InspectionService:
         if not self._write_frame_capture(capture_path, frame):
             self.logger.error("Failed to save frame capture to %s", capture_path)
             raise RuntimeError("Frame capture save failed")
-
-        resolved_distance = distance_m
-        if resolved_distance is None:
-            resolved_distance = self._extract_distance(video_row, frame)
-        if resolved_distance is None:
-            raise ValueError("distance_m is required")
 
         try:
             return self.db.create_defect(

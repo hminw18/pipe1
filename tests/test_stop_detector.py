@@ -3,7 +3,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from sewerpipe_inspector.stop_detection import StopDetectionConfig, StopSegmentDetector
+from pipe1_core.stop_detection import StopDetectionConfig, StopSegmentDetector
 
 
 def _make_motion_test_video(path: Path, fps: int = 10) -> None:

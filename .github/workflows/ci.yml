@@ -1,0 +1,93 @@
+# Tests, lint, dependency audits and secret scanning (docs/Web_Auth_Spec.md §14 phase 7).
+# Third-party actions are pinned to major versions and kept current by Dependabot.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-retries 30
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: uv sync --frozen
+      - run: uv run ruff check . && uv run ruff format --check .
+      - name: Tests (authorization matrix, row-level security, media pipeline)
+        env:
+          PIPE1_TEST_ADMIN_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+        run: uv run pytest -q
+      - name: Dependency audit
+        run: uv export --frozen --no-dev --no-emit-project --no-emit-package pipe1-core --no-hashes -o /tmp/requirements.txt && uvx pip-audit -r /tmp/requirements.txt --strict
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Qt runtime libraries (offscreen)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=moderate
+
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

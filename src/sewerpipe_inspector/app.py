@@ -9,7 +9,7 @@ from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QCheckBox, QDialog, QFileDialog, QMessageBox
 
 from sewerpipe_inspector.db import Database
-from sewerpipe_inspector.fonts import APP_FONT_FAMILY, find_app_font_paths
+from pipe1_core.fonts import APP_FONT_FAMILY, find_app_font_paths
 from sewerpipe_inspector.licensing.config import (
     LicenseRuntimeConfig,
     build_update_service,
@@ -20,7 +20,7 @@ from sewerpipe_inspector.licensing.errors import LicenseConfigurationError
 from sewerpipe_inspector.licensing.license_service import LicenseService, LicenseStatus
 from sewerpipe_inspector.logging_config import configure_logging
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.report_service import ReportService
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 from sewerpipe_inspector.services.training_upload_service import (
     TrainingUploadClient,

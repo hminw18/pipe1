@@ -1,0 +1,22 @@
+# Local PostgreSQL for development and tests.
+#   docker compose up -d
+# Roles match Cloud SQL: pipe1_migrator owns the schema, pipe1_app is the runtime role.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./dev/postgres-init.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      retries: 15
+
+volumes:
+  pgdata:

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Optional
@@ -74,7 +72,7 @@ from PySide6.QtWidgets import (
 )
 
 from sewerpipe_inspector.db import Database, MANHOLE_FIELDS, REPORT_FIELDS
-from sewerpipe_inspector.defect_taxonomy import (
+from pipe1_core.defect_taxonomy import (
     GRADE_ORDER,
     ITEM_CATEGORIES,
     condition_items_for_category,
@@ -85,26 +83,21 @@ from sewerpipe_inspector.defect_taxonomy import (
     grades_for_defect,
 )
 from sewerpipe_inspector.logging_config import configure_logging
-from sewerpipe_inspector.resources import find_resource
+from pipe1_core.resources import find_resource
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from sewerpipe_inspector.services.pdf_report_service import generate_pipe_pdf_report
+from pipe1_core.services.pdf_report_service import generate_pipe_pdf_report
 from sewerpipe_inspector.services.storage_service import StorageService
 from sewerpipe_inspector.services.video_service import VideoMeta, VideoService
 from sewerpipe_inspector.settings_service import load_settings, save_settings
-from sewerpipe_inspector.state_grading import (
+from pipe1_core.state_grading import (
     compute_pipe_state_grades,
     format_state_distance,
     format_state_section_label,
     format_state_time_range,
     format_state_value,
 )
-from sewerpipe_inspector.stop_detection import (
-    DepthOcrStopDetectionConfig,
-    DepthOcrStopSegmentDetector,
-    StopFrameCandidateDetectionConfig,
-    StopFrameCandidateDetector,
-)
-from sewerpipe_inspector.stop_detection.video_capture import open_analysis_video_capture
+from pipe1_core.stop_detection.pipeline import run_stop_analysis
+from pipe1_core.stop_detection.video_capture import open_analysis_video_capture
 from sewerpipe_inspector.ui.dialogs import (
     BusinessDialog,
     ProjectDialog,
@@ -138,7 +131,6 @@ VIDEO_FILE_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
 VIDEO_DISPLAY_WIDTH = 604
 VIDEO_DISPLAY_HEIGHT = 340
 REPORT_VIEW_SCALE_STEPS = (0.8, 0.9, 1.0, 1.1, 1.2)
-STOP_ANALYSIS_CANDIDATE_WORKERS = 8
 STOP_SEGMENT_PANEL_DEFAULT_WIDTH = 137
 STOP_SEGMENT_PANEL_MIN_WIDTH = 42
 STOP_SEGMENT_PANEL_MAX_WIDTH = 420
@@ -832,41 +824,6 @@ def format_short_timestamp(timestamp_ms: int) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
-def analyze_stop_frame_candidate_segment(
-    video_path: str,
-    segment: dict[str, float],
-) -> dict[str, object]:
-    candidate_detector = StopFrameCandidateDetector(
-        StopFrameCandidateDetectionConfig(
-            fps=5.0,
-            max_candidates_per_segment=3,
-            min_stable_duration=0.6,
-            min_candidate_gap=1.2,
-        )
-    )
-    cap = open_analysis_video_capture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
-    try:
-        read_started = time.perf_counter()
-        samples = candidate_detector._read_segment_samples(cap, segment)
-        read_seconds = time.perf_counter() - read_started
-    finally:
-        cap.release()
-
-    select_started = time.perf_counter()
-    candidates = candidate_detector._select_candidates(samples, segment)
-    select_seconds = time.perf_counter() - select_started
-
-    output = dict(segment)
-    output["candidates"] = candidates
-    output["analysis_seconds"] = read_seconds + select_seconds
-    output["candidate_read_seconds"] = read_seconds
-    output["candidate_select_seconds"] = select_seconds
-    output["candidate_sample_count"] = len(samples)
-    return output
-
-
 class StopAnalysisWorker(QObject):
     progress = Signal(int, str)
     finished = Signal(object, object)
@@ -883,112 +840,15 @@ class StopAnalysisWorker(QObject):
         self.depth_roi = depth_roi
 
     def run(self) -> None:
-        total_started = time.perf_counter()
-        benchmark: dict[str, object] = {
-            "depth_seconds": 0.0,
-            "candidate_seconds": 0.0,
-            "total_seconds": 0.0,
-            "candidate_error": None,
-        }
-
-        def depth_progress(current: int, total: int, message: str) -> None:
-            value = int(max(0, min(45, (current / max(1, total)) * 45)))
-            self.progress.emit(value, message)
-
         try:
-            self.progress.emit(0, "거리 OCR 준비")
-            depth_detector = DepthOcrStopSegmentDetector(
-                DepthOcrStopDetectionConfig(
-                    fps=1.0,
-                    min_stop_duration=3.0,
-                    stop_distance_tolerance_m=0.5,
-                    merge_gap_threshold=1.0,
-                    max_missing_bridge_seconds=3.0,
-                    min_digit_score=0.5,
-                )
+            result = run_stop_analysis(
+                self.video_path, self.depth_roi, progress=self.progress.emit
             )
-            started = time.perf_counter()
-            stop_segments = depth_detector.analyze(
-                self.video_path,
-                self.depth_roi,
-                progress_callback=depth_progress,
-            )
-            benchmark["depth_seconds"] = time.perf_counter() - started
         except Exception as exc:
             self.failed.emit(str(exc))
             return
+        self.finished.emit(result.segments, result.benchmark)
 
-        candidate_started = time.perf_counter()
-        analyzed_segments: list[dict[str, object]] = []
-        candidate_error: str | None = None
-        try:
-            total_segments = len(stop_segments)
-            self.progress.emit(
-                45,
-                "후보 프레임 병렬 분석 준비"
-                f" · 의심구간 {total_segments}개"
-                f" · 워커 {STOP_ANALYSIS_CANDIDATE_WORKERS}개",
-            )
-            if total_segments == 0:
-                analyzed_segments = []
-            else:
-                completed = 0
-                indexed_results: dict[int, dict[str, object]] = {}
-                max_workers = max(1, min(STOP_ANALYSIS_CANDIDATE_WORKERS, total_segments))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_index = {
-                        executor.submit(
-                            analyze_stop_frame_candidate_segment,
-                            self.video_path,
-                            segment,
-                        ): idx
-                        for idx, segment in enumerate(stop_segments)
-                    }
-                    for future in as_completed(future_to_index):
-                        idx = future_to_index[future]
-                        result = future.result()
-                        indexed_results[idx] = result
-                        completed += 1
-                        self.progress.emit(
-                            45 + int((completed / total_segments) * 55),
-                            "후보 프레임 병렬 분석"
-                            f" {completed}/{total_segments} 완료"
-                            f" · 최근 {float(result.get('analysis_seconds', 0.0)):.2f}s",
-                        )
-                analyzed_segments = [
-                    indexed_results[idx] for idx in range(total_segments)
-                ]
-                benchmark["candidate_workers"] = max_workers
-                benchmark["candidate_segment_seconds_sum"] = sum(
-                    float(segment.get("analysis_seconds", 0.0))
-                    for segment in analyzed_segments
-                )
-                benchmark["candidate_slowest_seconds"] = max(
-                    (
-                        float(segment.get("analysis_seconds", 0.0))
-                        for segment in analyzed_segments
-                    ),
-                    default=0.0,
-                )
-                benchmark["candidate_fastest_seconds"] = min(
-                    (
-                        float(segment.get("analysis_seconds", 0.0))
-                        for segment in analyzed_segments
-                    ),
-                    default=0.0,
-                )
-        except Exception as exc:
-            candidate_error = str(exc)
-            analyzed_segments = [
-                dict(segment, candidates=[], analysis_error=candidate_error)
-                for segment in stop_segments
-            ]
-
-        benchmark["candidate_seconds"] = time.perf_counter() - candidate_started
-        benchmark["candidate_error"] = candidate_error
-        benchmark["total_seconds"] = time.perf_counter() - total_started
-        self.progress.emit(100, "의심구간 분석 완료")
-        self.finished.emit(analyzed_segments, benchmark)
 
 
 def make_player_icon(name: str, size: int = 28) -> QIcon:
@@ -6589,7 +6449,7 @@ QWidget#reportDetailContent QPushButton#tablePickerButton {{
         self._release_video()
         if self.current_video_path is None:
             return
-        self.cap = cv2.VideoCapture(str(self.current_video_path))
+        self.cap = open_analysis_video_capture(self.current_video_path)
         if not self.cap.isOpened():
             self.cap = None
             self.video_overlay.hide()
