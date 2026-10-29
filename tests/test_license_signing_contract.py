@@ -3,9 +3,7 @@ from __future__ import annotations
 import copy
 
 import pytest
-
 from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
-
 
 SERVER_PUBLIC_KEY = "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik"
 SERVER_SIGNED_ENVELOPE = {

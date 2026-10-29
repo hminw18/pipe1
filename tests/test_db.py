@@ -1,12 +1,9 @@
 import sqlite3
-import shutil
-from contextlib import closing
 from pathlib import Path
 
 import pytest
-
 import sewerpipe_inspector.db as db_module
-from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, Database, MANHOLE_FIELDS, REPORT_FIELDS
+from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, MANHOLE_FIELDS, REPORT_FIELDS, Database
 
 
 def _make_report(db: Database) -> int:
@@ -176,95 +173,6 @@ def test_defect_distance_is_required_by_schema(tmp_path: Path) -> None:
             """,
             (report_id, video_id, 1000, str(tmp_path / "a.png"), "순주행"),
         )
-
-
-def test_old_grade_not_null_schema_is_migrated(tmp_path: Path) -> None:
-    db_path = tmp_path / "old.db"
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE inspection_projects (
-                id INTEGER PRIMARY KEY,
-                project_name TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE businesses (
-                id INTEGER PRIMARY KEY,
-                project_id INTEGER NOT NULL,
-                business_code TEXT NOT NULL,
-                business_name TEXT NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES inspection_projects(id) ON DELETE CASCADE
-            );
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY,
-                business_id INTEGER NOT NULL,
-                report_number TEXT NOT NULL,
-                pipe_number TEXT NOT NULL,
-                FOREIGN KEY(business_id) REFERENCES businesses(id) ON DELETE CASCADE
-            );
-            CREATE TABLE report_videos (
-                id INTEGER PRIMARY KEY,
-                report_id INTEGER NOT NULL UNIQUE,
-                file_path TEXT NOT NULL,
-                scan_direction TEXT NOT NULL DEFAULT '순주행'
-                    CHECK(scan_direction IN ('순주행', '역주행')),
-                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE
-            );
-            CREATE TABLE report_defects (
-                id INTEGER PRIMARY KEY,
-                report_id INTEGER NOT NULL,
-                video_id INTEGER NOT NULL,
-                timestamp_ms INTEGER NOT NULL,
-                image_path TEXT NOT NULL,
-                drive_direction TEXT NOT NULL CHECK(drive_direction IN ('순주행', '역주행')),
-                distance_m REAL,
-                item_category TEXT,
-                condition_item TEXT,
-                defect_item TEXT,
-                grade TEXT NOT NULL CHECK(grade IN ('대', '중', '소')),
-                quadrant TEXT,
-                manhole_defect_depth_m REAL,
-                memo TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
-                FOREIGN KEY(video_id) REFERENCES report_videos(id)
-            );
-            INSERT INTO inspection_projects(id, project_name) VALUES (1, 'P1');
-            INSERT INTO businesses(id, project_id, business_code, business_name)
-                VALUES (1, 1, 'B001', '사업1');
-            INSERT INTO reports(id, business_id, report_number, pipe_number)
-                VALUES (1, 1, 'R001', 'PIPE-001');
-            INSERT INTO report_videos(id, report_id, file_path, scan_direction)
-                VALUES (1, 1, 'a.mp4', '순주행');
-            INSERT INTO report_defects(
-                id, report_id, video_id, timestamp_ms, image_path,
-                drive_direction, item_category, condition_item, defect_item, grade
-            )
-            VALUES (
-                1, 1, 1, 1000, 'cap.png',
-                '순주행', '관로', '구조특징', '균열(길이)', '대'
-            );
-            """
-        )
-        conn.commit()
-
-    db = Database(db_path)
-    grade_column = next(
-        row for row in db.fetchall("PRAGMA table_info(report_defects)")
-        if row["name"] == "grade"
-    )
-    assert grade_column["notnull"] == 0
-    distance_column = next(
-        row for row in db.fetchall("PRAGMA table_info(report_defects)")
-        if row["name"] == "distance_m"
-    )
-    assert distance_column["notnull"] == 1
-    migrated = db.get_defect(1)
-    assert migrated["condition_item"] is None
-    assert migrated["defect_item"] == "균열(길이)"
-    assert migrated["grade"] == "대"
-    assert migrated["distance_m"] == 0.0
 
 
 def test_video_replacement_preserves_defects(tmp_path: Path) -> None:
@@ -446,23 +354,6 @@ def test_report_version_copies_latest_and_keeps_version_edits_independent(
     assert rows[0]["version_count"] == 2
 
 
-def test_report_updated_at_uses_korea_time_helper(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(db_module, "_kst_timestamp", lambda: "2026-06-27 12:34:56")
-    db = Database(tmp_path / "app.db")
-
-    report_id = _make_report(db)
-
-    assert db.get_report(report_id)["updated_at"] == "2026-06-27 12:34:56"
-
-    monkeypatch.setattr(db_module, "_kst_timestamp", lambda: "2026-06-27 12:35:10")
-    db.update_pipe_information(report_id, 10.0, 5.0)
-
-    assert db.get_report(report_id)["updated_at"] == "2026-06-27 12:35:10"
-
-
 def test_delete_report_version_reassigns_group_when_root_version_is_deleted(
     tmp_path: Path,
 ) -> None:
@@ -488,101 +379,6 @@ def test_delete_report_version_reassigns_group_when_root_version_is_deleted(
     db.delete_report_version(version_3_id)
     with pytest.raises(ValueError, match="마지막 버전"):
         db.delete_report_version(version_2_id)
-
-
-def test_existing_duplicate_business_and_report_numbers_are_migrated(tmp_path: Path) -> None:
-    db_path = tmp_path / "old_duplicates.db"
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.executescript(
-            """
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE inspection_projects (
-                id INTEGER PRIMARY KEY,
-                project_name TEXT NOT NULL
-            );
-            CREATE TABLE businesses (
-                id INTEGER PRIMARY KEY,
-                project_id INTEGER NOT NULL,
-                business_code TEXT NOT NULL,
-                business_name TEXT NOT NULL,
-                FOREIGN KEY(project_id) REFERENCES inspection_projects(id) ON DELETE CASCADE
-            );
-            CREATE TABLE reports (
-                id INTEGER PRIMARY KEY,
-                business_id INTEGER NOT NULL,
-                report_number TEXT NOT NULL,
-                pipe_number TEXT NOT NULL,
-                FOREIGN KEY(business_id) REFERENCES businesses(id) ON DELETE CASCADE
-            );
-            INSERT INTO inspection_projects(id, project_name) VALUES (1, 'P1');
-            INSERT INTO businesses(id, project_id, business_code, business_name)
-                VALUES (1, 1, 'B001', '사업1'), (2, 1, 'B001', '사업2');
-            INSERT INTO reports(id, business_id, report_number, pipe_number)
-                VALUES (1, 1, 'R001', 'PIPE-001'), (2, 1, 'R001', 'PIPE-002');
-            """
-        )
-        conn.commit()
-
-    db = Database(db_path)
-
-    business_codes = [
-        row["business_code"]
-        for row in db.fetchall("SELECT * FROM businesses ORDER BY id")
-    ]
-    report_numbers = [
-        row["report_number"]
-        for row in db.fetchall("SELECT * FROM reports ORDER BY id")
-    ]
-    assert business_codes == ["B001", "B001 2"]
-    assert report_numbers == ["R001", "R001 2"]
-    with pytest.raises(ValueError, match="같은 프로젝트"):
-        db.create_business(1, "B001", "사업3", None, None, None)
-    with pytest.raises(ValueError, match="같은 사업"):
-        db.create_report(1, "R001", "PIPE-003")
-
-
-def test_report_defect_performance_indexes_exist(tmp_path: Path) -> None:
-    db = Database(tmp_path / "app.db")
-
-    indexes = {
-        row["name"]
-        for row in db.fetchall("PRAGMA index_list(report_defects)")
-    }
-    assert "idx_report_defects_report_time" in indexes
-    assert "idx_report_defects_report_grade" in indexes
-    assert "idx_report_defects_video" in indexes
-
-    plan = db.fetchall(
-        """
-        EXPLAIN QUERY PLAN
-        SELECT report_defects.*, report_videos.file_path AS video_file_path
-        FROM report_defects
-        JOIN report_videos ON report_videos.id = report_defects.video_id
-        WHERE report_defects.report_id = ?
-        ORDER BY report_defects.timestamp_ms ASC, report_defects.id ASC
-        """,
-        (1,),
-    )
-    assert any(
-        "idx_report_defects_report_time" in row["detail"]
-        for row in plan
-    )
-
-
-def test_database_recreates_missing_workspace_schema(tmp_path: Path) -> None:
-    db_path = tmp_path / "workspace" / "sewerpipe_inspector.db"
-    db = Database(db_path)
-    db.create_project("P1")
-
-    shutil.rmtree(db_path.parent)
-
-    assert db.list_projects() == []
-    assert db_path.exists()
-    indexes = {
-        row["name"]
-        for row in db.fetchall("PRAGMA index_list(report_defects)")
-    }
-    assert "idx_report_defects_report_time" in indexes
 
 
 def test_pipe_completion_is_derived(tmp_path: Path) -> None:

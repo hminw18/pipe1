@@ -1,10 +1,10 @@
 from pipe1_core.defect_taxonomy import (
-    condition_items_for_category,
     condition_code,
+    condition_items_for_category,
     defect_code,
+    defect_score,
     display_condition_item,
     display_defect_item,
-    defect_score,
     grades_for_defect,
 )
 

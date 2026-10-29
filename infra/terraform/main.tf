@@ -223,10 +223,10 @@ resource "google_secret_manager_secret_iam_member" "api_csrf_key" {
 # --- Secrets added by hand -------------------------------------------------------
 # Terraform creates the secret; the value is added outside Terraform so it never
 # lands in state:
-#   gcloud secrets versions add pipe1-dev-sendgrid-api-key --data-file=-
+#   gcloud secrets versions add pipe1-dev-resend-api-key --data-file=-
 
-resource "google_secret_manager_secret" "sendgrid_api_key" {
-  secret_id = "${local.name}-sendgrid-api-key"
+resource "google_secret_manager_secret" "resend_api_key" {
+  secret_id = "${local.name}-resend-api-key"
   replication {
     user_managed {
       replicas {

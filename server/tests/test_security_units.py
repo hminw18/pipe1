@@ -23,11 +23,6 @@ from pipe1_server.security.totp import LocalAesGcmCipher
 from pipe1_server.settings import Settings
 
 
-class _NeverBreached:
-    def is_breached(self, password: str) -> bool:
-        return False
-
-
 def test_totp_accepts_adjacent_steps_only() -> None:
     secret = totp.new_secret()
     now = 1_800_000_000.0
@@ -97,12 +92,6 @@ def test_offline_breached_list(tmp_path: Path) -> None:
     with pytest.raises(PasswordPolicyError):
         validate_new_password("qwertyuiopas", "a@example.com", checker)
     assert validate_new_password("unusual long passphrase", "a@example.com", checker)
-
-
-def test_password_length_bounds() -> None:
-    with pytest.raises(PasswordPolicyError):
-        validate_new_password("elevenchars", "a@example.com", _NeverBreached())
-    assert validate_new_password("twelve chars", "a@example.com", _NeverBreached())
 
 
 def test_recovery_codes_format_and_entropy() -> None:

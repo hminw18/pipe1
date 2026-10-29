@@ -11,6 +11,7 @@ The app is being migrated to a multi-user web app (FastAPI + React on GCP, email
 - `docs/Defect_Taxonomy.md`: defect codes, condition items, grade scores
 - `docs/Web_Architecture.md`: GCP target architecture, migration phases, desktop issues not to carry over
 - `docs/Web_Auth_Spec.md`: login, sessions, roles, project visibility, authorization rules
+- `docs/Testing.md`: what each test protects and the bar a new test must meet; update it when adding or removing tests
 
 ## Commands
 

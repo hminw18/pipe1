@@ -9,6 +9,7 @@ import { DefectPanel, type DefectPanelApi } from './DefectPanel'
 import { ExportBar } from './ExportBar'
 import { PipeSection, ReportInfoTable } from './ReportTables'
 import { useDefects, useVideo, type PlayerApi } from './hooks'
+import { useLocalVideo } from './localVideo'
 import { VideoPanel } from './VideoPanel'
 
 const GRADE_KEYS: Record<string, string> = { '3': '대', '2': '중', '1': '소' }
@@ -24,6 +25,7 @@ export function ReportWorkspace() {
   const project = useProject(report.data?.project_id)
   const video = useVideo(reportId)
   const defects = useDefects(reportId)
+  const { local, start: startLocal } = useLocalVideo(reportId)
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const player = useRef<PlayerApi>(null)
@@ -129,11 +131,19 @@ export function ReportWorkspace() {
       {error && <p className="error ws-error">{error}</p>}
       <ReportInfoTable report={data} />
       <PipeSection report={data} />
-      <VideoPanel ref={player} reportId={reportId} canEdit={canEdit} defects={defects.data ?? []} />
+      <VideoPanel
+        ref={player}
+        reportId={reportId}
+        canEdit={canEdit}
+        defects={defects.data ?? []}
+        local={local}
+        onFile={(file) => void startLocal(file)}
+      />
       <DefectPanel
         ref={defectPanel}
         reportId={reportId}
-        canEdit={canEdit && video.data?.transcode_status === 'ready'}
+        // Capturing needs the video row; a local file supplies the frames before processing ends.
+        canEdit={canEdit && Boolean(video.data) && (Boolean(local) || video.data?.transcode_status === 'ready')}
         hasRoi={Boolean(video.data?.depth_roi)}
         player={player}
       />

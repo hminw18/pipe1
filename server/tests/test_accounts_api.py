@@ -9,7 +9,7 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 from pipe1_server.email.delivery import InMemoryQueue
-from pipe1_server.models.auth import Invitation, PasswordReset, User
+from pipe1_server.models.auth import PasswordReset, User
 from tests.api_support import (
     PASSWORD,
     Clock,
@@ -118,7 +118,7 @@ def test_inspector_cannot_invite(client: TestClient, owner_engine: Engine) -> No
     assert _invite(client, "x@example.com").status_code == 403
 
 
-def test_invited_admin_must_enroll_mfa(
+def test_invited_org_admin_signs_in_without_mfa(
     client: TestClient,
     owner_engine: Engine,
     clock: Clock,
@@ -132,13 +132,8 @@ def test_invited_admin_must_enroll_mfa(
         accepted = invitee.post(
             "/api/auth/invitations/accept", json={"token": token, "password": NEW_PASSWORD}
         )
-        assert accepted.json() == {"mfa_required": False, "mfa_enrollment_required": True}
-        assert invitee.get("/api/auth/me").status_code == 401
-        secret = invitee.post("/api/auth/mfa/enrollment", json={}).json()["secret"]
-        confirmed = invitee.post(
-            "/api/auth/mfa/enrollment/confirm", json={"code": pyotp.TOTP(secret).at(clock.now)}
-        )
-        assert confirmed.status_code == 200
+        assert accepted.json() == {"mfa_required": False, "mfa_enrollment_required": False}
+        assert invitee.get("/api/auth/me").json()["role"] == "org_admin"
 
 
 def test_bad_invitation_tokens_are_rate_limited_per_ip(client: TestClient) -> None:
@@ -442,17 +437,26 @@ def test_platform_admin_cannot_use_org_admin_api(platform_client: TestClient) ->
     assert platform_client.get("/api/admin/users").status_code == 403
 
 
-def test_platform_invitation_is_for_platform_admin(
-    platform_client: TestClient, owner_engine: Engine
+def test_invited_platform_admin_must_enroll_mfa(
+    platform_client: TestClient,
+    clock: Clock,
+    outbox: InMemoryQueue,
+    app_engine: Engine,
 ) -> None:
-    response = platform_client.post(
+    platform_client.post(
         "/api/platform/invitations",
-        json={"email": "ops2@pipe1.example"},
+        json={"email": "ops3@pipe1.example"},
         headers=csrf_headers(platform_client),
     )
-    assert response.status_code == 201
-    with Session(owner_engine) as session:
-        invitation = session.scalar(
-            select(Invitation).where(Invitation.email == "ops2@pipe1.example")
+    token = token_from_link(outbox.messages[-1].data["link"])
+    with make_client(app_engine, clock, make_settings(), outbox) as invitee:
+        accepted = invitee.post(
+            "/api/auth/invitations/accept", json={"token": token, "password": NEW_PASSWORD}
         )
-    assert invitation.role == "platform_admin" and invitation.organization_id is None
+        assert accepted.json() == {"mfa_required": False, "mfa_enrollment_required": True}
+        assert invitee.get("/api/auth/me").status_code == 401
+        secret = invitee.post("/api/auth/mfa/enrollment", json={}).json()["secret"]
+        confirmed = invitee.post(
+            "/api/auth/mfa/enrollment/confirm", json={"code": pyotp.TOTP(secret).at(clock.now)}
+        )
+        assert confirmed.status_code == 200

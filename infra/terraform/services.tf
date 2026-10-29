@@ -26,7 +26,7 @@ locals {
     PIPE1_JOB_QUEUE                = "cloud_tasks"
     PIPE1_MEDIA_CLIENT             = "worker"
     PIPE1_EMAIL_QUEUE              = "cloud_tasks"
-    PIPE1_EMAIL_SENDER             = "sendgrid"
+    PIPE1_EMAIL_SENDER             = "resend"
     PIPE1_EMAIL_FROM               = var.email_from
     PIPE1_TOTP_KMS_KEY             = google_kms_crypto_key.totp.id
     PIPE1_TASKS_SERVICE_ACCOUNT    = google_service_account.tasks.email
@@ -59,13 +59,13 @@ variable "domain" {
 }
 
 variable "email_from" {
-  description = "Sender for transactional email, on the SendGrid-authenticated domain."
+  description = "Sender for transactional email, on the domain verified in Resend."
   type        = string
   default     = "Pipe1 <no-reply@example.com>"
 }
 
-variable "sendgrid_configured" {
-  description = "Set true once a SendGrid API key version exists in the sendgrid secret; the mailer service is created only then (until then email tasks wait and retry)."
+variable "resend_configured" {
+  description = "Set true once a Resend API key version exists in the resend secret; the mailer service is created only then (until then email tasks wait and retry)."
   type        = bool
   default     = false
 }
@@ -257,10 +257,10 @@ resource "google_cloud_run_v2_service" "worker" {
   }
 }
 
-# Mailer: same worker image; only receives email tasks. No VPC, so it can reach SendGrid,
+# Mailer: same worker image; only receives email tasks. No VPC, so it can reach Resend,
 # and it has no database or media access to lose.
 resource "google_cloud_run_v2_service" "mailer" {
-  count               = local.deploy_services && var.sendgrid_configured ? 1 : 0
+  count               = local.deploy_services && var.resend_configured ? 1 : 0
   name                = "${local.name}-mailer"
   location            = var.region
   ingress             = "INGRESS_TRAFFIC_INTERNAL_ONLY"
@@ -297,10 +297,10 @@ resource "google_cloud_run_v2_service" "mailer" {
         }
       }
       env {
-        name = "PIPE1_SENDGRID_API_KEY"
+        name = "PIPE1_RESEND_API_KEY"
         value_source {
           secret_key_ref {
-            secret  = google_secret_manager_secret.sendgrid_api_key.secret_id
+            secret  = google_secret_manager_secret.resend_api_key.secret_id
             version = "latest"
           }
         }
@@ -311,13 +311,13 @@ resource "google_cloud_run_v2_service" "mailer" {
 
 resource "google_service_account" "mailer" {
   account_id   = "${local.name}-mailer"
-  display_name = "Pipe1 ${var.environment} mailer (SendGrid only)"
+  display_name = "Pipe1 ${var.environment} mailer (Resend only)"
 }
 
 resource "google_secret_manager_secret_iam_member" "mailer_secrets" {
   for_each = {
-    sendgrid = google_secret_manager_secret.sendgrid_api_key.id
-    csrf     = google_secret_manager_secret.csrf_key.id
+    resend = google_secret_manager_secret.resend_api_key.id
+    csrf   = google_secret_manager_secret.csrf_key.id
   }
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
@@ -325,7 +325,7 @@ resource "google_secret_manager_secret_iam_member" "mailer_secrets" {
 }
 
 resource "google_cloud_run_v2_service_iam_member" "mailer_invoker" {
-  count    = local.deploy_services && var.sendgrid_configured ? 1 : 0
+  count    = local.deploy_services && var.resend_configured ? 1 : 0
   name     = google_cloud_run_v2_service.mailer[0].name
   location = var.region
   role     = "roles/run.invoker"

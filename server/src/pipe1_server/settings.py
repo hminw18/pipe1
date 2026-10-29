@@ -37,24 +37,25 @@ class Settings(BaseSettings):
     login_challenge_ttl_seconds: int = 300
     login_challenge_max_attempts: int = 5
 
-    # Email (docs/Web_Auth_Spec.md §11). Queue: "inline" sends during the request (dev),
-    # "cloud_tasks" hands off to the worker. Sender: "console" logs (dev), "sendgrid" sends.
+    # Email (docs/Web_Auth_Spec.md §11). Queue: "inline" sends in the caller's thread (tests),
+    # "background" sends from a thread in this process (single-host dev VM), "cloud_tasks" hands
+    # off to the mailer (production). Sender: "console" logs (dev), "resend" sends.
     email_queue: str = "inline"
     email_sender: str = "console"
     email_from: str = "Pipe1 <no-reply@localhost>"
-    sendgrid_api_key: SecretStr | None = None
-    sendgrid_sandbox: bool = False
+    resend_api_key: SecretStr | None = None
     # Cloud Tasks: full queue name, worker endpoint URL, and the service account whose
     # OIDC token the worker accepts.
     cloud_tasks_queue: str | None = None
     worker_url: str | None = None
     tasks_service_account: str | None = None
-    # Email tasks go to a separate mailer service with internet egress (SendGrid); the media
+    # Email tasks go to a separate mailer service with internet egress (Resend); the media
     # worker has none. Falls back to worker_url.
     mailer_url: str | None = None
 
-    # Background jobs and media: "inline" runs in the API process after the response (dev);
-    # "cloud_tasks" / "worker" use the isolated worker service (production).
+    # Background jobs and media: "inline" runs in the caller's thread (tests), "background" runs
+    # on worker threads in the API process (single-host dev VM); "cloud_tasks" / "worker" use the
+    # isolated worker service (production).
     job_queue: str = "inline"
     media_client: str = "local"
     # Service account of the API; the worker accepts synchronous media calls only from it.
@@ -94,10 +95,21 @@ class Settings(BaseSettings):
                 raise ValueError("outside dev, jobs and media must run in the worker")
             if not self.api_service_account:
                 raise ValueError("PIPE1_API_SERVICE_ACCOUNT is required outside dev")
-            if self.email_queue != "cloud_tasks" or self.email_sender != "sendgrid":
-                raise ValueError("outside dev, email must use cloud_tasks and sendgrid")
+            if self.email_queue != "cloud_tasks" or self.email_sender != "resend":
+                raise ValueError("outside dev, email must use cloud_tasks and resend")
             if not (self.cloud_tasks_queue and self.worker_url and self.tasks_service_account):
                 raise ValueError("Cloud Tasks queue, worker URL and service account are required")
+        if self.job_queue not in ("inline", "background", "cloud_tasks"):
+            raise ValueError("PIPE1_JOB_QUEUE must be inline, background or cloud_tasks")
+        if self.email_queue not in ("inline", "background", "cloud_tasks"):
+            raise ValueError("PIPE1_EMAIL_QUEUE must be inline, background or cloud_tasks")
+        if self.email_sender not in ("console", "resend"):
+            raise ValueError("PIPE1_EMAIL_SENDER must be console or resend")
+        if self.email_sender == "resend":
+            if self.resend_api_key is None or not self.resend_api_key.get_secret_value():
+                raise ValueError("PIPE1_RESEND_API_KEY is required when sending with Resend")
+            if self.email_from.rstrip(">").endswith("@localhost"):
+                raise ValueError("PIPE1_EMAIL_FROM must be an address on a verified domain")
         if self.breached_password_source not in ("hibp", "offline"):
             raise ValueError("PIPE1_BREACHED_PASSWORD_SOURCE must be hibp or offline")
         return self

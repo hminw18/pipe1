@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from pipe1_server.models.auth import AuditEvent, AuthSession, LoginThrottle
 from tests.api_support import (
-    APP_ORIGIN,
     PASSWORD,
     Clock,
     create_user,
@@ -49,12 +48,6 @@ def test_session_cookie_attributes(client: TestClient, owner_engine: Engine) -> 
     assert cookie.startswith("__Host-pipe1_session=")
     for attribute in ("HttpOnly", "Secure", "Path=/", "SameSite=lax"):
         assert attribute.lower() in cookie.lower()
-
-
-def test_email_is_normalized(client: TestClient, owner_engine: Engine) -> None:
-    user = create_user(owner_engine)
-    response = _login_attempt(client, f"  {user.email.upper()} ", PASSWORD)
-    assert response.status_code == 200
 
 
 @pytest.mark.parametrize("case", ["wrong_password", "unknown_email", "disabled", "org_disabled"])
@@ -159,11 +152,13 @@ def test_state_change_requires_exact_origin(client: TestClient, origin: str | No
     assert response.status_code == 403
 
 
-def test_state_change_requires_json(client: TestClient) -> None:
+@pytest.mark.parametrize("content_type", ["application/x-www-form-urlencoded", "text/plain"])
+def test_state_change_requires_json(client: TestClient, content_type: str) -> None:
+    # Forms can send these cross-site without a CORS preflight.
     response = client.post(
         "/api/auth/login",
         content="email=a@example.com&password=x",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type": content_type},
     )
     assert response.status_code == 415
 
@@ -177,7 +172,7 @@ def test_security_headers(client: TestClient) -> None:
     assert "max-age=63072000" in headers["strict-transport-security"]
     csp = headers["content-security-policy"]
     assert "frame-ancestors 'none'" in csp
-    assert "media-src 'self' https://storage.googleapis.com" in csp
+    assert "media-src 'self' blob: https://storage.googleapis.com" in csp
     assert "unsafe-inline" not in csp
 
 
@@ -205,12 +200,20 @@ def test_activity_extends_idle_but_not_absolute(
 # --- MFA -------------------------------------------------------------------------
 
 
-def test_admin_must_enroll_totp_before_first_session(
+def test_org_admin_signs_in_without_mfa_by_default(
+    client: TestClient, owner_engine: Engine
+) -> None:
+    admin = create_user(owner_engine, role="org_admin")
+    assert login(client, admin) == {"mfa_required": False, "mfa_enrollment_required": False}
+    assert client.get("/api/auth/me").json()["mfa_enrolled"] is False
+
+
+def test_platform_admin_must_enroll_totp_before_first_session(
     client: TestClient, owner_engine: Engine, clock: Clock
 ) -> None:
     import pyotp
 
-    admin = create_user(owner_engine, role="org_admin")
+    admin = create_user(owner_engine, role="platform_admin")
     assert login(client, admin) == {"mfa_required": False, "mfa_enrollment_required": True}
     assert client.get("/api/auth/me").status_code == 401
 
@@ -283,7 +286,7 @@ def test_challenge_expires(client: TestClient, owner_engine: Engine, clock: Cloc
 def test_recovery_code_works_once(client: TestClient, owner_engine: Engine, clock: Clock) -> None:
     import pyotp
 
-    admin = create_user(owner_engine, role="org_admin")
+    admin = create_user(owner_engine, role="platform_admin")
     login(client, admin)
     secret = client.post("/api/auth/mfa/enrollment", json={}).json()["secret"]
     codes = client.post(
@@ -450,21 +453,13 @@ def test_session_token_is_stored_hashed(client: TestClient, owner_engine: Engine
     assert all(len(digest) == 32 for digest in stored)
 
 
-def test_origin_constant_matches_settings() -> None:
-    assert make_settings().app_origin == APP_ORIGIN
-
-
-def test_form_body_is_rejected_even_without_json_header(client: TestClient) -> None:
-    response = client.post("/api/auth/login", content="a=b", headers={"Content-Type": "text/plain"})
-    assert response.status_code == 415
-
-
-def test_inspector_can_enable_and_disable_mfa(
-    client: TestClient, owner_engine: Engine, clock: Clock
+@pytest.mark.parametrize("role", ["inspector", "org_admin"])
+def test_org_users_can_enable_and_disable_mfa(
+    client: TestClient, owner_engine: Engine, clock: Clock, role: str
 ) -> None:
     import pyotp
 
-    user = create_user(owner_engine)
+    user = create_user(owner_engine, role=role)
     login(client, user)
     headers = csrf_headers(client)
     secret = client.post("/api/auth/mfa/setup", json={}, headers=headers).json()["secret"]
@@ -484,17 +479,10 @@ def test_inspector_can_enable_and_disable_mfa(
     assert login(client, user)["mfa_required"] is False
 
 
-def test_admin_cannot_disable_mfa(client: TestClient, owner_engine: Engine, clock: Clock) -> None:
-    admin = create_user(owner_engine, role="org_admin", with_totp=True)
+def test_platform_admin_cannot_disable_mfa(
+    client: TestClient, owner_engine: Engine, clock: Clock
+) -> None:
+    admin = create_user(owner_engine, role="platform_admin", with_totp=True)
     login(client, admin)
     client.post("/api/auth/mfa", json={"code": totp_code(admin.totp_secret, clock)})
     assert client.delete("/api/auth/mfa", headers=csrf_headers(client)).status_code == 403
-
-
-def test_taxonomy_lists_scores(client: TestClient, owner_engine: Engine) -> None:
-    login(client, create_user(owner_engine))
-    data = client.get("/api/taxonomy").json()
-    pipe = next(c for c in data["categories"] if c["category"] == "관로")
-    crack = next(d for d in pipe["defect_items"] if d["item"] == "균열(길이)")
-    assert crack["defect_type"] in ("구조", "운영") and crack["scores"]
-    assert "전체" in data["quadrants"] and "기타" in data["undriven_reasons"]

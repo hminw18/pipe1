@@ -106,7 +106,7 @@ function MfaPanel() {
   const [setup, setSetup] = useState<Schemas['EnrollmentStart'] | null>(null)
   const [codes, setCodes] = useState<string[] | null>(null)
   const { run, view } = useStatus()
-  const isAdmin = me.role !== 'inspector'
+  const mfaRequired = me.role === 'platform_admin'
 
   if (codes) {
     return (
@@ -145,7 +145,7 @@ function MfaPanel() {
             복구 코드 다시 발급
           </button>
         )}
-        {me.mfa_enrolled && !isAdmin && (
+        {me.mfa_enrolled && !mfaRequired && (
           <button
             className="danger"
             onClick={() => {
@@ -161,7 +161,7 @@ function MfaPanel() {
           </button>
         )}
       </div>
-      {isAdmin && <p className="muted">관리자 계정은 2단계 인증을 해제할 수 없습니다.</p>}
+      {mfaRequired && <p className="muted">운영 관리자 계정은 2단계 인증을 해제할 수 없습니다.</p>}
       {view}
     </Panel>
   )

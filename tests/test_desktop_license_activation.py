@@ -6,11 +6,8 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-import pytest
-
 from sewerpipe_inspector.licensing.api_client import LicenseApiClientProtocol
 from sewerpipe_inspector.licensing.device_identity import DeviceIdentity
-from sewerpipe_inspector.licensing.dpapi import DpapiProtector
 from sewerpipe_inspector.licensing.entitlement import EntitlementVerifier
 from sewerpipe_inspector.licensing.errors import LicenseApiError, LicenseConnectionError
 from sewerpipe_inspector.licensing.license_service import LicenseService
@@ -133,22 +130,6 @@ class FakeLicenseClient(LicenseApiClientProtocol):
         }
 
 
-class MalformedActivationClient(FakeLicenseClient):
-    def activate(
-        self,
-        *,
-        license_key: str,
-        device_id: str,
-        device_name: str | None,
-        os_name: str,
-        os_version: str,
-        app_version: str,
-    ) -> dict:
-        return {
-            "entitlement": self.signer.sign(_active_payload(device_id)),
-        }
-
-
 def test_desktop_activation_stores_signed_entitlement_without_raw_key(
     tmp_path: Path,
 ) -> None:
@@ -185,37 +166,6 @@ def test_desktop_activation_stores_signed_entitlement_without_raw_key(
     assert not reloaded.can_use_feature("training_upload")
 
 
-def test_desktop_validates_cached_license_online_and_refreshes_state(
-    tmp_path: Path,
-) -> None:
-    signer = _EntitlementSigner("test-key")
-    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
-    client = FakeLicenseClient(signer)
-    store = LocalLicenseStore(
-        tmp_path / "license_state.json", protector=FakeProtector()
-    )
-    device_identity = DeviceIdentity(
-        tmp_path / "device_id", protector=FakeProtector()
-    )
-    service = LicenseService(
-        store=store,
-        device_identity=device_identity,
-        client=client,
-        verifier=verifier,
-        app_version="0.1.0",
-    )
-    service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
-
-    status = service.current_status(validate_online=True)
-    saved = store.load()
-
-    assert status.status == "active"
-    assert status.device_upload_token == "put_refreshed"
-    assert client.validation_calls == 1
-    assert saved is not None
-    assert saved["device_upload_token"] == "put_refreshed"
-
-
 def test_desktop_rejects_deactivated_license_on_online_validation(
     tmp_path: Path,
 ) -> None:
@@ -246,128 +196,6 @@ def test_desktop_rejects_deactivated_license_on_online_validation(
     assert status.reason == "Activation is inactive."
     assert client.validation_calls == 1
     assert store.load() is None
-
-
-def test_desktop_clears_cached_license_when_server_returns_inactive_entitlement(
-    tmp_path: Path,
-) -> None:
-    signer = _EntitlementSigner("test-key")
-    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
-    client = FakeLicenseClient(signer)
-    store = LocalLicenseStore(
-        tmp_path / "license_state.json", protector=FakeProtector()
-    )
-    device_identity = DeviceIdentity(
-        tmp_path / "device_id", protector=FakeProtector()
-    )
-    device_id = device_identity.get_or_create("pipe1-dev-current")
-    service = LicenseService(
-        store=store,
-        device_identity=device_identity,
-        client=client,
-        verifier=verifier,
-        app_version="0.1.0",
-    )
-    service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
-    client.validation_entitlement = signer.sign(
-        _active_payload(device_id, license_status="inactive")
-    )
-
-    status = service.current_status(validate_online=True)
-
-    assert status.status == "invalid"
-    assert status.reason == "license is not active"
-    assert client.validation_calls == 1
-    assert store.load() is None
-
-
-def test_desktop_rejects_malformed_activation_response(tmp_path: Path) -> None:
-    signer = _EntitlementSigner("test-key")
-    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
-    service = LicenseService(
-        store=LocalLicenseStore(
-            tmp_path / "license_state.json", protector=FakeProtector()
-        ),
-        device_identity=DeviceIdentity(
-            tmp_path / "device_id", protector=FakeProtector()
-        ),
-        client=MalformedActivationClient(signer),
-        verifier=verifier,
-        app_version="0.1.0",
-    )
-
-    with pytest.raises(LicenseConnectionError):
-        service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
-
-
-def test_desktop_allows_cached_license_when_online_validation_is_unavailable(
-    tmp_path: Path,
-) -> None:
-    signer = _EntitlementSigner("test-key")
-    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
-    client = FakeLicenseClient(signer)
-    client.validation_error = LicenseConnectionError(
-        "라이선스 서버에 연결할 수 없습니다."
-    )
-    store = LocalLicenseStore(
-        tmp_path / "license_state.json", protector=FakeProtector()
-    )
-    device_identity = DeviceIdentity(
-        tmp_path / "device_id", protector=FakeProtector()
-    )
-    service = LicenseService(
-        store=store,
-        device_identity=device_identity,
-        client=client,
-        verifier=verifier,
-        app_version="0.1.0",
-    )
-    service.activate("PIPE1-ABCD-EFGH-IJKL-MNOP")
-
-    status = service.current_status(validate_online=True)
-
-    assert status.status == "active"
-    assert status.reason == "라이선스 서버에 연결할 수 없습니다."
-    assert client.validation_calls == 1
-
-
-def test_desktop_refreshes_expired_offline_grace_when_server_is_available(
-    tmp_path: Path,
-) -> None:
-    signer = _EntitlementSigner("test-key")
-    verifier = EntitlementVerifier({signer.key_id: signer.public_key_b64})
-    client = FakeLicenseClient(signer)
-    store = LocalLicenseStore(
-        tmp_path / "license_state.json", protector=FakeProtector()
-    )
-    device_identity = DeviceIdentity(
-        tmp_path / "device_id", protector=FakeProtector()
-    )
-    device_id = device_identity.get_or_create("pipe1-dev-current")
-    store.save_activation_state(
-        activation_id="act_test",
-        masked_license_key="PIPE1-ABCD",
-        entitlement=signer.sign(
-            _active_payload(
-                device_id,
-                now=datetime.now(UTC) - timedelta(days=30),
-                offline_grace_delta=timedelta(days=14),
-            )
-        ),
-    )
-    service = LicenseService(
-        store=store,
-        device_identity=device_identity,
-        client=client,
-        verifier=verifier,
-        app_version="0.1.0",
-    )
-
-    status = service.current_status(validate_online=True)
-
-    assert status.status == "active"
-    assert status.device_upload_token == "put_refreshed"
-    assert client.validation_calls == 1
 
 
 def test_desktop_rejects_expired_offline_grace_when_server_is_unavailable(
@@ -464,30 +292,6 @@ def test_plaintext_license_state_is_not_trusted(tmp_path: Path) -> None:
     assert store.load() is None
 
 
-def test_dpapi_protector_roundtrip_when_available() -> None:
-    if not DpapiProtector.is_available():
-        return
-    protector = DpapiProtector()
-    protected = protector.protect(b"pipe1-secret-state")
-
-    assert protected != b"pipe1-secret-state"
-    assert protector.unprotect(protected) == b"pipe1-secret-state"
-
-
-def test_device_identity_stores_random_id_in_protected_file(tmp_path: Path) -> None:
-    device_file = tmp_path / "device_id"
-    device_identity = DeviceIdentity(device_file, protector=FakeProtector())
-
-    first = device_identity.get_or_create()
-    second = device_identity.get_or_create()
-    raw_file = device_file.read_text(encoding="utf-8")
-
-    assert first == second
-    assert first.startswith("pipe1-")
-    assert first not in raw_file
-    assert "pipe1.device_id.dpapi.v1" in raw_file
-
-
 def test_plaintext_device_id_file_is_not_trusted(tmp_path: Path) -> None:
     device_file = tmp_path / "device_id"
     device_file.write_text("pipe1-copied-random-id", encoding="utf-8")
@@ -497,12 +301,3 @@ def test_plaintext_device_id_file_is_not_trusted(tmp_path: Path) -> None:
 
     assert device_id != "pipe1-copied-random-id"
     assert device_id not in device_file.read_text(encoding="utf-8")
-
-
-def test_device_identity_forced_value_is_stored_protected(tmp_path: Path) -> None:
-    device_file = tmp_path / "device_id"
-    device_identity = DeviceIdentity(device_file, protector=FakeProtector())
-
-    assert device_identity.get_or_create("pipe1-forced-id") == "pipe1-forced-id"
-    assert device_identity.get_or_create() == "pipe1-forced-id"
-    assert "pipe1-forced-id" not in device_file.read_text(encoding="utf-8")

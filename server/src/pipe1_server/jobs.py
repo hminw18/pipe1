@@ -14,7 +14,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import queue
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -23,7 +25,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.db import set_access_context
@@ -70,13 +72,50 @@ class InMemoryJobQueue:
 
 
 class InlineJobQueue:
-    """Development: run right away (called from a background task, after the commit)."""
+    """Tests: run right away, in the caller's thread (after the commit)."""
 
     def __init__(self, runner: JobRunner) -> None:
         self._runner = runner
 
     def enqueue(self, job_id: uuid.UUID, user_id: uuid.UUID) -> None:
         self._runner.run(job_id, user_id)
+
+
+class BackgroundJobQueue:
+    """Single-host deployments (the dev VM): worker threads in the API process, so a long
+    video job never holds up a request. Jobs left queued or running by a restart are picked
+    up again at startup (resume_unfinished); production relies on Cloud Tasks retries."""
+
+    def __init__(self, runner: JobRunner, *, threads: int = 2) -> None:
+        self._runner = runner
+        self._queue: queue.Queue[tuple[uuid.UUID, uuid.UUID]] = queue.Queue()
+        for index in range(threads):
+            threading.Thread(target=self._run, name=f"pipe1-jobs-{index}", daemon=True).start()
+
+    def enqueue(self, job_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        self._queue.put((job_id, user_id))
+
+    def join(self) -> None:
+        """Wait until every queued job has finished (tests)."""
+        self._queue.join()
+
+    def resume_unfinished(self, session_factory: sessionmaker[Session]) -> int:
+        with session_factory.begin() as db:
+            rows = db.execute(text("SELECT id, created_by FROM app_unfinished_media_jobs()")).all()
+        for job_id, user_id in rows:
+            logger.warning("resuming job %s interrupted by a restart", job_id)
+            self.enqueue(job_id, user_id)
+        return len(rows)
+
+    def _run(self) -> None:
+        while True:
+            job_id, user_id = self._queue.get()
+            try:
+                self._runner.run(job_id, user_id)
+            except Exception:  # noqa: BLE001 - keep the thread alive; run() records failures
+                logger.exception("job %s crashed", job_id)
+            finally:
+                self._queue.task_done()
 
 
 class CloudTasksJobQueue:
@@ -128,6 +167,12 @@ class MediaClient(Protocol):
         self, object_key: str, timestamp_ms: int, roi: tuple[int, int, int, int] | None
     ) -> tuple[bytes, float | None]: ...
 
+    def from_image(
+        self, data: bytes, roi: tuple[int, int, int, int] | None
+    ) -> tuple[bytes, float | None]:
+        """Validate a frame captured in the browser; raises media.MediaError if unusable."""
+        ...
+
 
 class LocalMediaClient:
     """Development and tests: parse in-process. Production uses WorkerMediaClient so
@@ -142,6 +187,12 @@ class LocalMediaClient:
         png = media.extract_frame_png(media_source(self._store, object_key), timestamp_ms)
         return png, media.read_distance(png, roi) if roi else None
 
+    def from_image(self, data, roi):
+        from pipe1_server import media
+
+        png = media.normalize_frame_png(data)
+        return png, media.read_distance(png, roi) if roi else None
+
 
 class WorkerMediaClient:
     """Calls the worker with a Google-signed ID token for the API's service account."""
@@ -150,20 +201,41 @@ class WorkerMediaClient:
         self._url = worker_url.rstrip("/")
 
     def capture(self, object_key, timestamp_ms, roi):
+        return self._post(
+            "capture", {"object_key": object_key, "timestamp_ms": timestamp_ms, "roi": roi}
+        )
+
+    def from_image(self, data, roi):
+        from pipe1_server import media
+
+        try:
+            return self._post(
+                "frame", {"png_base64": base64.b64encode(data).decode("ascii"), "roi": roi}
+            )
+        except _Rejected as error:
+            raise media.MediaError("frame rejected by the worker") from error
+
+    def _post(self, endpoint: str, body: dict[str, Any]) -> tuple[bytes, float | None]:
         import httpx2
         from google.auth.transport.requests import Request
         from google.oauth2 import id_token
 
         token = id_token.fetch_id_token(Request(), self._url)
         response = httpx2.post(
-            f"{self._url}/internal/media/capture",
-            json={"object_key": object_key, "timestamp_ms": timestamp_ms, "roi": roi},
+            f"{self._url}/internal/media/{endpoint}",
+            json=body,
             headers={"Authorization": f"Bearer {token}"},
             timeout=90.0,
         )
+        if response.status_code == 422:
+            raise _Rejected(endpoint)
         response.raise_for_status()
         payload = response.json()
         return base64.b64decode(payload["png_base64"]), payload.get("distance")
+
+
+class _Rejected(Exception):
+    pass
 
 
 # --- Runner -------------------------------------------------------------------------
@@ -287,12 +359,12 @@ class JobRunner:
                 if still_used is None:
                     self._store.delete(original_key)
                 raise UserFacingError(INVALID_VIDEO) from error
-            progress(15, "재생용 영상 변환")
             playback = directory / "playback.mp4"
-            media.transcode_for_browser(source, playback)
+            self._prepare_playback(source, playback, probe, progress)
             progress(80, "타임라인 미리보기 생성")
             thumbnails = directory / "thumbnails.jpg"
-            interval = media.thumbnail_strip(source, thumbnails, probe.duration_seconds)
+            # The local playback copy, not the source: it may be a remote signed URL.
+            interval = media.thumbnail_strip(str(playback), thumbnails, probe.duration_seconds)
             folder = f"{group_prefix}video/{uuid.uuid4()}/"
             playback_key, thumbnail_key = f"{folder}playback.mp4", f"{folder}thumbnails.jpg"
             self._store.upload_from(playback, playback_key, "video/mp4")
@@ -316,6 +388,20 @@ class JobRunner:
             "width": probe.width,
             "height": probe.height,
         }
+
+    @staticmethod
+    def _prepare_playback(source, playback: Path, probe, progress) -> None:
+        from pipe1_server import media
+
+        if probe.browser_playable:
+            progress(15, "재생용 영상 준비")
+            try:
+                media.remux_for_browser(source, playback)
+                return
+            except media.MediaError as error:
+                logger.warning("remux failed, re-encoding instead: %s", error)
+        progress(15, "재생용 영상 변환")
+        media.transcode_for_browser(source, playback)
 
     # -- stop_analysis -------------------------------------------------------------------
 

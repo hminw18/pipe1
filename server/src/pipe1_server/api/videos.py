@@ -181,6 +181,22 @@ def start_upload(
             expires_at=expires,
         )
     )
+    # The first upload creates the report's video row right away ('uploading'), so defects can
+    # be captured from the local file in the browser while the upload runs. A replacement
+    # leaves the current video in place until the new upload completes.
+    video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report.id))
+    if video is None:
+        db.add(
+            ReportVideo(
+                project_id=project.id,
+                report_id=report.id,
+                original_object_key=key,
+                original_filename=body.filename[:255],
+                transcode_status="uploading",
+            )
+        )
+    elif video.transcode_status == "uploading":
+        video.original_object_key, video.original_filename = key, body.filename[:255]
     url = store.signed_upload_url(key, content_type, body.size_bytes)
     if isinstance(store, LocalObjectStore):
         return UploadSession(
@@ -231,14 +247,13 @@ def complete_upload(
 
     video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report.id))
     replaced_keys: set[str] = set()
-    if video is None:
-        video = ReportVideo(
-            project_id=project.id,
-            report_id=report.id,
-            original_object_key=upload.object_key,
-            original_filename=upload.original_filename,
-        )
-        db.add(video)
+    if video is None or video.transcode_status == "uploading":
+        # First upload: fill in the row created when it started (it holds no media yet).
+        if video is None:
+            video = ReportVideo(project_id=project.id, report_id=report.id)
+            db.add(video)
+        video.original_object_key = upload.object_key
+        video.original_filename = upload.original_filename
     else:
         # Keep the row (defects reference it); swap the media and reset processing.
         replaced_keys = {

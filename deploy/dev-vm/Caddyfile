@@ -5,7 +5,7 @@ pipe1dev.cloud {
 	# Same headers as the API sets (docs/Web_Auth_Spec.md §7), for the static frontend too.
 	header {
 		Strict-Transport-Security "max-age=63072000; includeSubDomains"
-		Content-Security-Policy "default-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; img-src 'self'; media-src 'self' blob:; connect-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
 		Cross-Origin-Opener-Policy same-origin

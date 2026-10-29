@@ -148,7 +148,7 @@ export function LoginFlow({
     return (
       <div className="stack">
         <h3>2단계 인증 등록</h3>
-        <p className="muted">관리자 계정은 2단계 인증이 필요합니다.</p>
+        <p className="muted">운영 관리자 계정은 2단계 인증이 필요합니다.</p>
         <EnrollmentForm
           secret={step.secret}
           uri={step.uri}

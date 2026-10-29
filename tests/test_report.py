@@ -2,14 +2,13 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-
-from sewerpipe_inspector.db import Database
-from sewerpipe_inspector.services.inspection_service import InspectionService
 from pipe1_core.services.report_service import (
     AGGREGATE_CONDITION_ITEMS,
     AGGREGATE_DEFECT_ITEMS,
+    ReportService,
 )
-from pipe1_core.services.report_service import ReportService
+from sewerpipe_inspector.db import Database
+from sewerpipe_inspector.services.inspection_service import InspectionService
 from sewerpipe_inspector.services.storage_service import StorageService
 
 

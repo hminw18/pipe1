@@ -192,7 +192,7 @@ class ReportVideo(UuidPrimaryKey, Timestamps, Base):
         UniqueConstraint("id", "report_id"),
         CheckConstraint(f"scan_direction IN {DRIVE_DIRECTIONS}", name="scan_direction"),
         CheckConstraint(
-            "transcode_status IN ('pending', 'processing', 'ready', 'failed')",
+            "transcode_status IN ('uploading', 'pending', 'processing', 'ready', 'failed')",
             name="transcode_status",
         ),
         CheckConstraint(

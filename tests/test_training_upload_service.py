@@ -4,12 +4,11 @@ import base64
 from pathlib import Path
 from typing import Any
 
+from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.db import ACTUAL_SURVEY_FIELDS, MANHOLE_FIELDS, REPORT_FIELDS, Database
 from sewerpipe_inspector.services.inspection_service import InspectionService
-from pipe1_core.services.report_service import ReportService
 from sewerpipe_inspector.services.storage_service import StorageService
 from sewerpipe_inspector.services.training_upload_service import TrainingUploadService
-
 
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"

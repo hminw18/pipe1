@@ -14,6 +14,7 @@ TEMPLATES = {
     "email_change_confirm",
     "email_changed_notice",
     "mfa_reset_notice",
+    "delivery_test",
 }
 
 
@@ -85,6 +86,9 @@ def render(template: str, data: dict[str, Any]) -> RenderedEmail:
             "관리자가 계정의 2단계 인증을 초기화했고 모든 로그인이 종료되었습니다.",
             "다음 로그인 때 인증 앱을 다시 등록하세요. 요청한 적이 없다면 관리자에게 알리세요.",
         ]
+    elif template == "delivery_test":
+        subject = "[Pipe1] 메일 발송 테스트"
+        paragraphs = ["운영자가 Pipe1 메일 발송 설정을 확인하기 위해 보낸 테스트 메일입니다."]
     else:
         raise ValueError(f"unknown email template: {template}")
     return RenderedEmail(

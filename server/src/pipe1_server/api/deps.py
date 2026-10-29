@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from pipe1_server.db import get_db, get_session_factory, set_access_context
 from pipe1_server.email.delivery import EmailQueue, build_queue
 from pipe1_server.jobs import (
+    BackgroundJobQueue,
     CloudTasksJobQueue,
     InlineJobQueue,
     JobQueue,
@@ -156,7 +157,6 @@ def _email_queue(
     queue: str,
     sender: str,
     from_address: str,
-    sandbox: bool,
     tasks_queue: str | None,
     worker_url: str | None,
     tasks_account: str | None,
@@ -168,11 +168,10 @@ def _email_queue(
         email_queue=queue,
         email_sender=sender,
         email_from=from_address,
-        sendgrid_sandbox=sandbox,
         cloud_tasks_queue=tasks_queue,
         worker_url=worker_url,
         tasks_service_account=tasks_account,
-        sendgrid_api_key=api_key,
+        resend_api_key=api_key,
         mailer_url=mailer_url,
     )
     return build_queue(settings)
@@ -183,11 +182,10 @@ def get_email_queue(settings: AppSettings) -> EmailQueue:
         settings.email_queue,
         settings.email_sender,
         settings.email_from,
-        settings.sendgrid_sandbox,
         settings.cloud_tasks_queue,
         settings.worker_url,
         settings.tasks_service_account,
-        settings.sendgrid_api_key.get_secret_value() if settings.sendgrid_api_key else None,
+        settings.resend_api_key.get_secret_value() if settings.resend_api_key else None,
         settings.mailer_url,
     )
 
@@ -222,7 +220,15 @@ def get_job_queue(settings: AppSettings, session_factory: SessionFactory, store:
         return _cloud_tasks_job_queue(
             settings.cloud_tasks_queue, settings.worker_url, settings.tasks_service_account
         )
+    if settings.job_queue == "background":
+        return background_job_queue()
     return InlineJobQueue(JobRunner(session_factory, store))
+
+
+@lru_cache
+def background_job_queue() -> BackgroundJobQueue:
+    """One per process, so its threads and queue outlive the request that enqueued a job."""
+    return BackgroundJobQueue(JobRunner(get_session_factory(), build_store(get_settings())))
 
 
 @lru_cache

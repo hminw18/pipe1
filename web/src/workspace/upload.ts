@@ -70,11 +70,17 @@ async function uploadGcsResumable(session: Schemas['UploadSession'], file: File,
   }
 }
 
-export async function uploadVideo(reportId: string, file: File, progress: Progress): Promise<Schemas['VideoOut']> {
+export async function uploadVideo(
+  reportId: string,
+  file: File,
+  progress: Progress,
+  onStarted?: () => unknown,
+): Promise<Schemas['VideoOut']> {
   const session = await post<Schemas['UploadSession']>(`/api/reports/${reportId}/video/uploads`, {
     filename: file.name,
     size_bytes: file.size,
   })
+  void onStarted?.()
   if (session.protocol === 'put') await uploadSimplePut(session, file, progress)
   else await uploadGcsResumable(session, file, progress)
   return post<Schemas['VideoOut']>(`/api/video-uploads/${session.upload_id}/complete`)

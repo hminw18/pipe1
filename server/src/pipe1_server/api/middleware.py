@@ -16,7 +16,7 @@ CONTENT_SECURITY_POLICY = "; ".join(
     [
         "default-src 'self'",
         f"img-src 'self' {STORAGE_ORIGIN}",
-        f"media-src 'self' {STORAGE_ORIGIN}",
+        f"media-src 'self' blob: {STORAGE_ORIGIN}",
         f"connect-src 'self' {STORAGE_ORIGIN}",
         "style-src 'self'",
         "script-src 'self'",

@@ -14,8 +14,8 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.api.auth import (
-    ADMIN_ROLES,
     MAX_PASSWORD_INPUT,
+    MFA_REQUIRED_ROLES,
     BreachedChecker,
     LoginResponse,
     _cookie_options,
@@ -188,7 +188,7 @@ def accept_invitation(
         email=invitation.email,
         role=invitation.role,
         status="active",
-        mfa_required=invitation.role in ADMIN_ROLES,
+        mfa_required=invitation.role in MFA_REQUIRED_ROLES,
     )
     db.add(user)
     db.flush()

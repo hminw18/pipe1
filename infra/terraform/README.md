@@ -24,10 +24,10 @@ terraform plan -var-file=envs/dev.tfvars
 terraform apply -var-file=envs/dev.tfvars    # creates billed resources
 ```
 
-After apply, add the SendGrid API key without putting it in Terraform state:
+After apply, add the Resend API key without putting it in Terraform state:
 
 ```bash
-gcloud secrets versions add pipe1-dev-sendgrid-api-key --data-file=-   # paste key, then Ctrl-D
+gcloud secrets versions add pipe1-dev-resend-api-key --data-file=-   # paste key, then Ctrl-D
 ```
 
 ## Cost notes (dev)

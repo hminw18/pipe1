@@ -7,6 +7,7 @@ service account, with this service's URL as audience (docs/Web_Auth_Spec.md §10
 from __future__ import annotations
 
 import base64
+import logging
 import uuid
 from collections.abc import Callable
 from typing import Annotated, Any
@@ -16,10 +17,19 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.db import get_session_factory
-from pipe1_server.email.delivery import EmailMessage, EmailSender, build_sender
+from pipe1_server.email.delivery import (
+    EmailMessage,
+    EmailSender,
+    PermanentEmailError,
+    build_sender,
+)
+from pipe1_server.email.templates import mask_email
 from pipe1_server.jobs import JobRunner, media_source
+from pipe1_server.media import MAX_FRAME_BYTES
 from pipe1_server.settings import Settings, get_settings
 from pipe1_server.storage import build_store
+
+logger = logging.getLogger(__name__)
 
 TokenVerifier = Callable[[str, str], dict[str, Any]]
 
@@ -90,6 +100,12 @@ class CaptureRequest(BaseModel):
     roi: tuple[int, int, int, int] | None = None
 
 
+class FrameRequest(BaseModel):
+    # base64 inflates by 4/3.
+    png_base64: str = Field(max_length=MAX_FRAME_BYTES * 4 // 3 + 4)
+    roi: tuple[int, int, int, int] | None = None
+
+
 class CaptureResponse(BaseModel):
     png_base64: str
     distance: float | None
@@ -111,8 +127,13 @@ def create_worker_app() -> FastAPI:
         except (ValueError, KeyError) as error:
             # Malformed tasks are not retried.
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT) from error
-        # Provider errors propagate as 500 so Cloud Tasks retries with backoff.
-        sender.send(message)
+        # Transient provider errors propagate as 500 so Cloud Tasks retries with backoff; a
+        # message the provider rejects outright is dropped instead of retried forever.
+        try:
+            sender.send(message)
+        except PermanentEmailError as error:
+            recipient = mask_email(message.to)
+            logger.error("email %s to %s not sent: %s", message.template, recipient, error)
 
     @app.post(
         "/internal/tasks/job",
@@ -144,6 +165,22 @@ def create_worker_app() -> FastAPI:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "frame unavailable"
             ) from error
+        distance = media.read_distance(png, body.roi) if body.roi else None
+        return CaptureResponse(png_base64=base64.b64encode(png).decode("ascii"), distance=distance)
+
+    @app.post(
+        "/internal/media/frame",
+        response_model=CaptureResponse,
+        dependencies=[Depends(require_api_service)],
+    )
+    def frame(body: FrameRequest) -> CaptureResponse:
+        """Validate and re-encode a frame the browser captured, and read its depth counter."""
+        from pipe1_server import media
+
+        try:
+            png = media.normalize_frame_png(base64.b64decode(body.png_base64, validate=True))
+        except (ValueError, media.MediaError) as error:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid frame") from error
         distance = media.read_distance(png, body.roi) if body.roi else None
         return CaptureResponse(png_base64=base64.b64encode(png).decode("ascii"), distance=distance)
 

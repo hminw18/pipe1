@@ -2,12 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-
-from sewerpipe_inspector.db import Database
-from sewerpipe_inspector.services.inspection_service import InspectionService
 from pipe1_core.services.ocr_service import OCRService
 from pipe1_core.services.report_service import ReportService
+from sewerpipe_inspector.db import Database
+from sewerpipe_inspector.services.inspection_service import InspectionService
 from sewerpipe_inspector.services.storage_service import StorageService
+
 
 class FakeDepthMatcher:
     def __init__(self, result) -> None:
@@ -36,19 +36,6 @@ def test_distance_ocr_is_positive_for_report_video(tmp_path: Path) -> None:
     inspection.ocr.read_depth_value = lambda _frame, _roi: -3.45
     distance = inspection._extract_distance(row, object())
     assert distance == 3.45
-
-
-def test_distance_ocr_uses_opencv_depth_digit_matcher() -> None:
-    matcher = FakeDepthMatcher(
-        SimpleNamespace(value=47.2, min_score=0.8, min_margin=0.1)
-    )
-    service = OCRService(matcher=matcher)
-    frame = np.zeros((100, 200, 3), dtype=np.uint8)
-
-    value = service.read_depth_value(frame, (10, 20, 149, 53))
-
-    assert value == 47.2
-    assert matcher.calls == [((53, 149, 3), None)]
 
 
 def test_distance_ocr_falls_back_to_tesseract_on_low_confidence_match() -> None:

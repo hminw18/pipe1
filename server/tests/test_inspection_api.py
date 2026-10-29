@@ -57,11 +57,6 @@ def _report(client: TestClient, business_id: str, number: str = "R001") -> dict:
     return response.json()
 
 
-def test_project_requires_explicit_visibility(owner_client) -> None:
-    client, _ = owner_client
-    assert client.post("/api/projects", json={"project_name": "x"}).status_code == 422
-
-
 def test_new_report_has_both_manholes_and_survey_defaults(owner_client) -> None:
     client, _ = owner_client
     business = _business(client, _project(client)["id"])

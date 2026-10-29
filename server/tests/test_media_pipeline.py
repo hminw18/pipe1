@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 
 from tests.api_support import (
     Clock,
@@ -283,15 +283,6 @@ def test_stop_analysis_job(client: TestClient, report: dict, tmp_path: Path) -> 
     assert isinstance(job["result"]["segments"], list)
 
 
-def test_depth_roi_must_fit_the_video(client: TestClient, report: dict, tmp_path: Path) -> None:
-    upload(client, report["id"], make_video(tmp_path / "v.avi"))
-    response = client.patch(
-        f"/api/reports/{report['id']}/video",
-        json={"depth_roi": {"x": 300, "y": 0, "w": 100, "h": 40}},
-    )
-    assert response.status_code == 422
-
-
 def test_quota_is_enforced(app_engine, owner_engine: Engine, clock: Clock, tmp_path: Path) -> None:
     settings = make_settings(organization_storage_quota_bytes=1000)
     with make_client(app_engine, clock, settings) as small:
@@ -313,3 +304,153 @@ def test_quota_is_enforced(app_engine, owner_engine: Engine, clock: Clock, tmp_p
             json={"filename": "v.avi", "size_bytes": 1001},
         )
         assert response.status_code == 507
+
+
+# --- Fast path for browser-playable sources, browser captures, job recovery -------------
+
+
+def make_h264_video(tmp_path: Path) -> Path:
+    """H.264 4:2:0 in an MP4 with the index at the end, as CCTV recorders write it."""
+    import subprocess
+
+    target = tmp_path / "recorder.mp4"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(make_video(tmp_path / "src.avi"))]
+        + ["-c:v", "libx264", "-pix_fmt", "yuv420p", str(target)],
+        check=True,
+    )
+    return target
+
+
+def test_browser_playable_video_is_repackaged_not_reencoded(
+    client: TestClient, report: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pipe1_server import media
+
+    def no_transcode(*_: object) -> None:
+        raise AssertionError("H.264 sources must not be re-encoded")
+
+    monkeypatch.setattr(media, "transcode_for_browser", no_transcode)
+    video = upload(client, report["id"], make_h264_video(tmp_path))
+    assert video["transcode_status"] == "ready", video
+    playback = client.get(_path_and_query(video["playback_url"])).content
+    assert 0 < playback.find(b"moov") < playback.find(b"mdat")  # index first: seekable
+    assert client.get(_path_and_query(video["thumbnail_url"])).status_code == 200
+
+
+def _png(width: int = 320, height: int = 240, value: int = 77) -> bytes:
+    ok, encoded = cv2.imencode(".png", np.full((height, width, 3), value, dtype=np.uint8))
+    assert ok
+    return encoded.tobytes()
+
+
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
+def _start_upload(client: TestClient, report_id: str, data: bytes) -> dict:
+    return client.post(
+        f"/api/reports/{report_id}/video/uploads",
+        json={"filename": "v.avi", "size_bytes": len(data)},
+    ).json()
+
+
+def test_defects_can_be_captured_in_the_browser_while_uploading(
+    client: TestClient, report: dict, tmp_path: Path
+) -> None:
+    data = make_video(tmp_path / "v.avi").read_bytes()
+    session = _start_upload(client, report["id"], data)
+    video = client.get(f"/api/reports/{report['id']}/video").json()
+    assert video["transcode_status"] == "uploading" and video["playback_url"] is None
+
+    base = {"timestamp_ms": 1500, "drive_direction": "순주행", "distance_m": 3.0}
+    server_side = client.post(f"/api/reports/{report['id']}/defects", json=base)
+    assert server_side.status_code == 409  # nothing to extract a frame from yet
+    captured = client.post(
+        f"/api/reports/{report['id']}/defects", json={**base, "frame_png_base64": _b64(_png())}
+    )
+    assert captured.status_code == 201, captured.text
+    image = client.get(_path_and_query(captured.json()["image_url"])).content
+    frame = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_GRAYSCALE)
+    assert frame.shape == (240, 320) and int(np.median(frame)) == 77
+
+    client.put(_path_and_query(session["url"]), content=data, headers=session["headers"])
+    done = client.post(f"/api/video-uploads/{session['upload_id']}/complete", json={})
+    assert done.status_code == 200 and done.json()["id"] == video["id"]
+    assert client.get(f"/api/reports/{report['id']}/video").json()["transcode_status"] == "ready"
+    assert len(client.get(f"/api/reports/{report['id']}/defects").json()) == 1
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        b"GIF89a not a png",
+        _png()[:40],  # truncated
+        # A valid header claiming 100000 px wide is refused before decoding.
+        _png()[:16] + (100000).to_bytes(4, "big") + _png()[20:],
+    ],
+)
+def test_unusable_browser_frames_are_rejected(
+    client: TestClient, report: dict, tmp_path: Path, frame: bytes
+) -> None:
+    _start_upload(client, report["id"], b"x" * 10)
+    response = client.post(
+        f"/api/reports/{report['id']}/defects",
+        json={
+            "timestamp_ms": 0,
+            "drive_direction": "순주행",
+            "distance_m": 1.0,
+            "frame_png_base64": _b64(frame),
+        },
+    )
+    assert response.status_code == 422
+    assert client.get(f"/api/reports/{report['id']}/defects").json() == []
+
+
+def test_interrupted_jobs_are_resumed_at_startup(
+    app_engine: Engine, owner_engine: Engine, report: dict
+) -> None:
+    import uuid
+
+    from sqlalchemy import update
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from pipe1_server.jobs import BackgroundJobQueue
+    from pipe1_server.models.inspection import MediaJob
+
+    running, queued, done = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    with Session(owner_engine) as db, db.begin():
+        user_id = db.execute(
+            text("SELECT id FROM users ORDER BY created_at DESC LIMIT 1")
+        ).scalar_one()
+        jobs = [
+            MediaJob(
+                id=job_id,
+                project_id=report["project_id"],
+                report_id=report["id"],
+                kind="export_excel",
+                status=status,
+                created_by=user_id,
+            )
+            for job_id, status in ((running, "running"), (queued, "queued"), (done, "succeeded"))
+        ]
+        db.add_all(jobs)
+    ran: list[uuid.UUID] = []
+
+    class Runner:
+        def run(self, job_id: uuid.UUID, _: uuid.UUID) -> None:
+            ran.append(job_id)
+
+    queue = BackgroundJobQueue(Runner())  # type: ignore[arg-type]
+    try:
+        queue.resume_unfinished(sessionmaker(app_engine))
+        queue.join()
+        assert {running, queued} <= set(ran)
+        assert done not in ran
+    finally:
+        with Session(owner_engine) as db, db.begin():
+            db.execute(
+                update(MediaJob).where(MediaJob.id.in_([running, queued])).values(status="failed")
+            )

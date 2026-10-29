@@ -10,6 +10,8 @@ export type PlayerApi = {
   toggle: () => void
   stepFrames: (frames: number) => void
   jumpSeconds: (seconds: number) => void
+  /** Base64 PNG of the shown frame when playing the local file; null means capture server-side. */
+  captureFrame: () => Promise<string | null>
 }
 
 export function useVideo(reportId: string) {
@@ -26,7 +28,7 @@ export function useVideo(reportId: string) {
     // Poll while the worker processes the upload.
     refetchInterval: (query) => {
       const status = query.state.data?.transcode_status
-      return status === 'pending' || status === 'processing' ? 3000 : false
+      return status === 'pending' || status === 'processing' ? 5000 : false
     },
   })
 }

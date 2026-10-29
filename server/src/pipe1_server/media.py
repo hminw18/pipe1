@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,10 @@ TRANSCODE_TIMEOUT_SECONDS = 4 * 3600
 FRAME_TIMEOUT_SECONDS = 60
 THUMBNAIL_WIDTH = 160
 MAX_THUMBNAIL_TILES = 200
+# Frames captured in the browser (8K is the largest recorder output we expect).
+MAX_FRAME_BYTES = 48 * 1024 * 1024
+MAX_FRAME_SIDE = 8192
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 class MediaError(RuntimeError):
@@ -40,6 +45,13 @@ class ProbeResult:
     fps: float
     width: int
     height: int
+    pix_fmt: str = ""
+
+    @property
+    def browser_playable(self) -> bool:
+        """8-bit 4:2:0 H.264 plays in every browser once it is in an MP4 with the index first,
+        so it only needs repackaging, not re-encoding (most CCTV recorders produce it)."""
+        return self.codec == "h264" and self.pix_fmt in ("yuv420p", "yuvj420p")
 
 
 def _protocols(source: str) -> str:
@@ -115,7 +127,42 @@ def probe(source: str) -> ProbeResult:
     width, height = int(video.get("width") or 0), int(video.get("height") or 0)
     if duration <= 0 or width <= 0 or height <= 0:
         raise MediaError("video has no duration or size")
-    return ProbeResult(format_name, str(video.get("codec_name", "")), duration, fps, width, height)
+    return ProbeResult(
+        format_name,
+        str(video.get("codec_name", "")),
+        duration,
+        fps,
+        width,
+        height,
+        str(video.get("pix_fmt", "")),
+    )
+
+
+def remux_for_browser(source: str, destination: Path) -> None:
+    """Copy the H.264 stream into an MP4 with the index at the front: no re-encoding, so it
+    takes about as long as reading the file once."""
+    _run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-y",
+            # AVI and some recorder files carry no presentation timestamps.
+            "-fflags",
+            "+genpts",
+            *_input_args(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-c:v",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(destination),
+        ],
+        TRANSCODE_TIMEOUT_SECONDS,
+    )
 
 
 def transcode_for_browser(source: str, destination: Path) -> None:
@@ -139,6 +186,9 @@ def transcode_for_browser(source: str, destination: Path) -> None:
             "23",
             "-pix_fmt",
             "yuv420p",
+            # A keyframe every 2 s: quick seeking in the browser and keyframe-only thumbnails.
+            "-force_key_frames",
+            "expr:gte(t,n_forced*2)",
             "-movflags",
             "+faststart",
             str(destination),
@@ -152,28 +202,38 @@ def thumbnail_interval(duration_seconds: float) -> float:
 
 
 def thumbnail_strip(source: str, destination: Path, duration_seconds: float) -> float:
-    """One JPEG with a tile every interval seconds, left to right. Returns the interval."""
+    """One JPEG with a tile every interval seconds, left to right. Returns the interval.
+
+    First only keyframes are decoded, so a long video is not decoded a second time; each tile
+    shows the nearest earlier keyframe, close enough for a timeline preview. Videos with too
+    few keyframes to fill the strip get a full decode instead."""
     interval = thumbnail_interval(duration_seconds)
     tiles = max(1, min(MAX_THUMBNAIL_TILES, math.ceil(duration_seconds / interval)))
-    _run(
-        [
-            "ffmpeg",
-            "-nostdin",
-            "-v",
-            "error",
-            "-y",
-            *_input_args(source),
-            "-vf",
-            f"fps=1/{interval},scale={THUMBNAIL_WIDTH}:-2,tile={tiles}x1",
-            "-frames:v",
-            "1",
-            "-q:v",
-            "5",
-            str(destination),
-        ],
-        TRANSCODE_TIMEOUT_SECONDS,
-    )
-    return interval
+    for keyframes_only in (True, False):
+        destination.unlink(missing_ok=True)
+        _run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                *(["-skip_frame", "nokey"] if keyframes_only else []),
+                *_input_args(source),
+                "-vf",
+                f"fps=1/{interval},scale={THUMBNAIL_WIDTH}:-2,tile={tiles}x1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "5",
+                str(destination),
+            ],
+            TRANSCODE_TIMEOUT_SECONDS,
+        )
+        # ffmpeg writes nothing (and still succeeds) when the strip cannot be filled.
+        if destination.exists() and destination.stat().st_size > 0:
+            return interval
+    raise MediaError("could not build the thumbnail strip")
 
 
 def extract_frame_png(source: str, timestamp_ms: int) -> bytes:
@@ -200,6 +260,27 @@ def extract_frame_png(source: str, timestamp_ms: int) -> bytes:
         ],
         FRAME_TIMEOUT_SECONDS,
     )
+
+
+def normalize_frame_png(data: bytes) -> bytes:
+    """A frame the browser captured from the user's local file. Accept only a PNG of sane
+    dimensions (checked in the header, before decoding) and re-encode it, so only pixels are
+    stored."""
+    import cv2
+    import numpy as np
+
+    if len(data) > MAX_FRAME_BYTES or data[:8] != PNG_SIGNATURE or data[12:16] != b"IHDR":
+        raise MediaError("not a PNG frame")
+    width, height = struct.unpack(">II", data[16:24])
+    if not (0 < width <= MAX_FRAME_SIDE and 0 < height <= MAX_FRAME_SIDE):
+        raise MediaError("frame dimensions out of range")
+    frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise MediaError("unreadable frame")
+    ok, encoded = cv2.imencode(".png", frame)
+    if not ok:
+        raise MediaError("could not encode frame")
+    return encoded.tobytes()
 
 
 def read_distance(png: bytes, roi: tuple[int, int, int, int]) -> float | None:

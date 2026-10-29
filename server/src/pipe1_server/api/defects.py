@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import uuid
 from datetime import datetime
 from typing import Literal
@@ -27,6 +29,7 @@ from pipe1_server.api.deps import (
 from pipe1_server.api.reports import load_report
 from pipe1_server.db import after_commit
 from pipe1_server.ids import uuid7
+from pipe1_server.media import MAX_FRAME_BYTES, MediaError
 from pipe1_server.models.inspection import Report, ReportDefect, ReportVideo
 from pipe1_server.services.reports import capture_key
 from pipe1_server.storage import IMAGE_URL_TTL
@@ -67,9 +70,15 @@ class DefectFields(BaseModel):
     memo: str | None = Field(default=None, max_length=2000)
 
 
+# A PNG of the frame the browser showed, captured from the user's local file while it is
+# still uploading or processing. Without it the server extracts the frame from the upload.
+FrameField = Field(default=None, max_length=MAX_FRAME_BYTES * 4 // 3 + 4)
+
+
 class DefectCreate(DefectFields):
     timestamp_ms: int = Field(ge=0)
     drive_direction: Direction
+    frame_png_base64: str | None = FrameField
 
 
 class DefectOut(BaseModel):
@@ -103,6 +112,7 @@ class DistanceSuggestion(BaseModel):
 
 class TimestampRequest(BaseModel):
     timestamp_ms: int = Field(ge=0)
+    frame_png_base64: str | None = FrameField
 
 
 def _validate_classification(fields: dict) -> None:
@@ -156,13 +166,27 @@ def defect_out(defect: ReportDefect, store) -> DefectOut:
     )
 
 
-def _video_for_capture(db, report_id: uuid.UUID) -> ReportVideo:
+def _video_for_capture(db, report_id: uuid.UUID, browser_frame: bool) -> ReportVideo:
     video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
     if video is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "먼저 영상을 등록하세요.")
-    if video.transcode_status != "ready":
+    # A browser frame needs only the video row (created when the upload starts).
+    if not browser_frame and video.transcode_status != "ready":
         raise HTTPException(status.HTTP_409_CONFLICT, "영상 처리가 끝난 뒤 캡처할 수 있습니다.")
     return video
+
+
+def _frame(
+    media, video: ReportVideo, timestamp_ms: int, frame_png_base64: str | None
+) -> tuple[bytes, float | None]:
+    if frame_png_base64 is None:
+        return media.capture(video.original_object_key, timestamp_ms, _roi(video))
+    try:
+        return media.from_image(base64.b64decode(frame_png_base64, validate=True), _roi(video))
+    except (binascii.Error, MediaError) as error:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "캡처한 화면을 읽을 수 없습니다."
+        ) from error
 
 
 def _roi(video: ReportVideo) -> tuple[int, int, int, int] | None:
@@ -207,11 +231,10 @@ def suggest_distance(
 ) -> DistanceSuggestion:
     """Depth-counter OCR at a timestamp, to prefill the distance field."""
     load_report(db, active.user, report_id, "view", ip, user_agent)
-    video = _video_for_capture(db, report_id)
-    roi = _roi(video)
-    if roi is None:
+    video = _video_for_capture(db, report_id, body.frame_png_base64 is not None)
+    if _roi(video) is None:
         return DistanceSuggestion(distance_m=None)
-    _, distance = media.capture(video.original_object_key, body.timestamp_ms, roi)
+    _, distance = _frame(media, video, body.timestamp_ms, body.frame_png_base64)
     return DistanceSuggestion(distance_m=distance)
 
 
@@ -228,14 +251,15 @@ def capture_defect(
     ip: ClientIp,
     user_agent: UserAgent,
 ) -> DefectOut:
-    """Extract the full-resolution frame server-side at timestamp_ms and save the defect."""
+    """Save the defect with the full-resolution frame at timestamp_ms: extracted server-side,
+    or the frame the browser captured from the local file."""
     report, _, project = load_report(db, active.user, report_id, "edit", ip, user_agent)
-    fields = body.model_dump()
+    fields = body.model_dump(exclude={"frame_png_base64"})
     _validate_classification(fields)
-    video = _video_for_capture(db, report.id)
+    video = _video_for_capture(db, report.id, body.frame_png_base64 is not None)
     if video.duration_seconds and body.timestamp_ms > video.duration_seconds * 1000:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "영상 길이를 벗어난 시점입니다.")
-    png, ocr_distance = media.capture(video.original_object_key, body.timestamp_ms, _roi(video))
+    png, ocr_distance = _frame(media, video, body.timestamp_ms, body.frame_png_base64)
     distance = body.distance_m if body.distance_m is not None else ocr_distance
     # Validate before storing anything, so a rejected capture leaves no orphan image.
     if distance is None:

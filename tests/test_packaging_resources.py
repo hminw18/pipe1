@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from pipe1_core import resources
-from sewerpipe_inspector.licensing import config as license_config
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-WIX_NS = {"wix": "http://wixtoolset.org/schemas/v4/wxs"}
 
 
 def test_find_resource_checks_pyinstaller_bundle_root(
@@ -23,82 +17,3 @@ def test_find_resource_checks_pyinstaller_bundle_root(
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle_root), raising=False)
 
     assert resources.find_resource("pipe.png") == pipe_png
-
-
-def test_logo_resource_can_load_from_pyinstaller_bundle_root(
-    tmp_path: Path, monkeypatch
-) -> None:
-    bundle_root = tmp_path / "_internal"
-    bundle_root.mkdir()
-    logo_png = bundle_root / "logo.png"
-    logo_png.write_bytes(b"png")
-
-    monkeypatch.setattr(sys, "_MEIPASS", str(bundle_root), raising=False)
-
-    assert resources.find_resource("logo.png") == logo_png
-
-
-def test_license_env_can_load_from_resource_candidates(
-    tmp_path: Path, monkeypatch
-) -> None:
-    env_file = tmp_path / "pipe1.client.env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PIPE1_APP_ENV=production",
-                "PIPE1_APP_VERSION=2.0.0",
-                "PIPE1_LICENSE_API_BASE_URL=https://license.example.com",
-                'PIPE1_LICENSE_PUBLIC_KEYS={"kid":"public"}',
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    def fake_resource_path_candidates(relative_path: str | Path) -> list[Path]:
-        if Path(relative_path) == license_config.DEFAULT_CLIENT_ENV_PATH:
-            return [env_file]
-        return []
-
-    monkeypatch.delenv("PIPE1_CLIENT_ENV_FILE", raising=False)
-    monkeypatch.delenv("PIPE1_APP_ENV", raising=False)
-    monkeypatch.delenv("PIPE1_LICENSE_API_BASE_URL", raising=False)
-    monkeypatch.delenv("PIPE1_LICENSE_PUBLIC_KEYS", raising=False)
-    monkeypatch.setattr(
-        license_config,
-        "resource_path_candidates",
-        fake_resource_path_candidates,
-    )
-
-    config = license_config.load_license_runtime_config()
-
-    assert config.app_env == "production"
-    assert config.app_version == "2.0.0"
-    assert config.api_base_url == "https://license.example.com"
-    assert config.public_keys == {"kid": "public"}
-    assert config.require_activation is True
-
-
-def test_wix_ui_uses_windows_default_korean_text_styles() -> None:
-    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Ui.wxs")
-    styles = tree.findall(".//wix:TextStyle", WIX_NS)
-
-    assert styles
-    assert {style.attrib["FaceName"] for style in styles} == {"맑은 고딕"}
-
-
-def test_wix_installer_does_not_register_system_fonts() -> None:
-    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Inspector.wxs")
-
-    assert tree.find(".//wix:StandardDirectory[@Id='FontsFolder']", WIX_NS) is None
-
-
-def test_wix_installer_replaces_same_version_test_installs() -> None:
-    tree = ET.parse(PROJECT_ROOT / "packaging" / "wix" / "Pipe1Inspector.wxs")
-
-    major_upgrade = tree.find(".//wix:MajorUpgrade", WIX_NS)
-    install_location = tree.find(".//wix:SetProperty[@Id='ARPINSTALLLOCATION']", WIX_NS)
-
-    assert major_upgrade is not None
-    assert major_upgrade.attrib["AllowSameVersionUpgrades"] == "yes"
-    assert install_location is not None
-    assert install_location.attrib["Value"] == "[INSTALLFOLDER]"

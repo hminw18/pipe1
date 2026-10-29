@@ -902,7 +902,8 @@ export interface paths {
         put?: never;
         /**
          * Capture Defect
-         * @description Extract the full-resolution frame server-side at timestamp_ms and save the defect.
+         * @description Save the defect with the full-resolution frame at timestamp_ms: extracted server-side,
+         *     or the frame the browser captured from the local file.
          */
         post: operations["capture_defect_api_reports__report_id__defects_post"];
         delete?: never;
@@ -1256,6 +1257,8 @@ export interface components {
              * @enum {string}
              */
             drive_direction: "순주행" | "역주행";
+            /** Frame Png Base64 */
+            frame_png_base64?: string | null;
             /** Grade */
             grade?: ("대" | "중" | "소") | null;
             /** Item Category */
@@ -1929,6 +1932,8 @@ export interface components {
         };
         /** TimestampRequest */
         TimestampRequest: {
+            /** Frame Png Base64 */
+            frame_png_base64?: string | null;
             /** Timestamp Ms */
             timestamp_ms: number;
         };

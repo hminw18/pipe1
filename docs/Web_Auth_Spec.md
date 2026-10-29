@@ -16,8 +16,8 @@ Baseline standards: OWASP ASVS 4.0.3 Level 2 (V2 Authentication, V3 Session Mana
 | Org member edit rights | Can edit org-visible projects; delete and visibility change stay with owner and org admin |
 | Session | Opaque server-side session; idle timeout 2 hours, absolute 12 hours |
 | CSRF | HMAC-signed synchronizer token derived from the session, plus `Origin` check |
-| MFA | TOTP, required for `org_admin` and `platform_admin`, optional for inspectors |
-| Email | SendGrid |
+| MFA | TOTP, required for `platform_admin`; optional (off by default) for `org_admin` and inspectors |
+| Email | Resend |
 | Implementation | In-house in FastAPI with vetted libraries: `pwdlib[argon2]`, `pyotp`, `secrets`, `hmac` |
 
 ## 2. Roles and Permissions
@@ -25,7 +25,7 @@ Baseline standards: OWASP ASVS 4.0.3 Level 2 (V2 Authentication, V3 Session Mana
 | Role | Who | Capabilities |
 | --- | --- | --- |
 | `platform_admin` | Pipe1 operator staff | Create organizations and their first org admin; deactivate organizations. Separate admin area behind IAP. MFA required. No access to customer project data. |
-| `org_admin` | Customer manager | Invite/deactivate users in own org, change roles, reset a user's MFA, transfer project ownership, view org audit log. MFA required. |
+| `org_admin` | Customer manager | Invite/deactivate users in own org, change roles, reset a user's MFA, transfer project ownership, view org audit log. MFA optional. |
 | `inspector` | Field user | Create projects, set visibility, work on accessible projects. |
 
 Project permission matrix (all access is confined to the user's own organization):
@@ -131,7 +131,7 @@ Endpoint: `POST /api/auth/login` with `{email, password}`.
   - send any body as `Content-Type: application/json` (requests without a body, such as `DELETE`, need no content type), so plain HTML forms, which always send a form content type, cannot reach the API.
 - Response headers on every response:
   - `Strict-Transport-Security: max-age=63072000; includeSubDomains`
-  - `Content-Security-Policy: default-src 'self'; img-src 'self' https://storage.googleapis.com; media-src 'self' https://storage.googleapis.com; connect-src 'self' https://storage.googleapis.com; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`. No `'unsafe-inline'` or `'unsafe-eval'`; if a UI library needs inline styles, use nonces.
+  - `Content-Security-Policy: default-src 'self'; img-src 'self' https://storage.googleapis.com; media-src 'self' blob: https://storage.googleapis.com; connect-src 'self' https://storage.googleapis.com; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`. No `'unsafe-inline'` or `'unsafe-eval'`; if a UI library needs inline styles, use nonces.
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: strict-origin-when-cross-origin`
   - `Cross-Origin-Opener-Policy: same-origin`
@@ -153,13 +153,13 @@ Endpoint: `POST /api/auth/login` with `{email, password}`.
 ### 9.1 Organization onboarding
 
 1. `platform_admin` creates the organization and invites its first `org_admin`.
-2. The org admin accepts the invitation, sets a password, and enrolls TOTP before first access.
+2. The org admin accepts the invitation and sets a password. TOTP is optional and can be enabled later in settings.
 
 ### 9.2 Invitation
 
 1. Org admin submits email and role.
 2. Server creates an invitation token (single use, expires in 72 hours) and queues the invite email.
-3. The invitee opens the link, sets a password (section 4); admins must also enroll TOTP.
+3. The invitee opens the link and sets a password (section 4). Only platform admins must also enroll TOTP; everyone else may enable it in settings.
 4. The user becomes `active`; the invitation is marked used.
 5. Re-sending an invitation revokes the previous token (the database allows one open invitation per email).
 6. Inviting an email that already has an account is rejected with `초대할 수 없는 이메일입니다.` This reveals to the org admin that the address is registered somewhere; it is accepted because only authenticated admins can ask, invite creation is rate-limited per admin, and every attempt is audited.
@@ -206,17 +206,17 @@ Requires re-authentication, a confirmation link sent to the new address (single 
 7. Internal endpoints (Cloud Tasks → worker) are not reachable from the internet (Cloud Run ingress `internal`) and verify the Google-signed OIDC token of the Cloud Tasks service account. Each task carries the requesting user and organization; the worker sets the same access context and re-checks authorization.
 8. The API's Cloud Run service uses ingress `internal-and-cloud-load-balancing`, so Cloud Armor cannot be bypassed through the `run.app` URL.
 
-## 11. Email (SendGrid)
+## 11. Email (Resend)
 
-- Sender domain authenticated in SendGrid (SPF, DKIM, custom return path); DMARC record published, starting at `p=quarantine`.
-- Restricted API key with only Mail Send permission, stored in Secret Manager, readable only by the worker service account.
-- Click tracking and open tracking disabled for all auth emails so token links are not rewritten through a third-party domain.
-- Templates (Korean) live in the repository (`server/src/pipe1_server/email/templates.py`), are HTML-escaped, and are rendered by the worker, so wording is reviewed and versioned with the code and needs no manual SendGrid setup: invitation, password reset, password changed, email-change confirmation, email-changed notice to old address (new address masked), MFA reset notice. A new-device login notice is optional and not yet implemented.
+- Sending domain verified in Resend (DKIM, plus SPF and MX on the `send` return-path subdomain); DMARC record published, starting at `p=quarantine`.
+- API key with "Sending access" only, restricted to the sending domain, stored in Secret Manager, readable only by the mailer service account.
+- Click tracking and open tracking disabled on the sending domain (Resend's default) so token links are not rewritten through a third-party domain.
+- Templates (Korean) live in the repository (`server/src/pipe1_server/email/templates.py`), are HTML-escaped, and are rendered by the worker, so wording is reviewed and versioned with the code and needs no manual setup in Resend: invitation, password reset, password changed, email-change confirmation, email-changed notice to old address (new address masked), MFA reset notice. A new-device login notice is optional and not yet implemented.
 - Token links put the token in the URL fragment (`/invite#token=...`), which browsers never send to servers, so tokens stay out of access logs and `Referer` headers.
 - Emails are sent from a Cloud Tasks job, not inside the HTTP request, so provider latency or outages do not affect login responses or reveal account existence.
-- If the Event Webhook is used, its signature is verified; bounced invitations are shown to the org admin.
-- Development and CI use sandbox mode or a fake mail backend.
-- SendGrid processes recipient email addresses outside Korea; this must be disclosed in the Privacy Policy (see `docs/Web_Architecture.md` §8).
+- If Resend webhooks are used, their signature is verified; bounced invitations are shown to the org admin.
+- Development and CI use the console sender or a fake mail backend (Resend's `delivered@resend.dev` test address for live checks).
+- Resend processes recipient email addresses outside Korea; this must be disclosed in the Privacy Policy (see `docs/Web_Architecture.md` §8).
 
 ## 12. Audit and Monitoring
 
@@ -231,7 +231,7 @@ Audited actions: login success/failure, logout, lockout, MFA challenge failure, 
 
 | Requirement | Standard | Pipe1 | Reason |
 | --- | --- | --- | --- |
-| Idle session timeout | ASVS 4.0.3 V3.3.2 (L2): 30 minutes | 2 hours | Long video review sessions. Compensated by 12-hour absolute timeout, heartbeat-based activity, MFA for admins, session list with global logout, Cloud Armor rate limiting, and audit logging. |
+| Idle session timeout | ASVS 4.0.3 V3.3.2 (L2): 30 minutes | 2 hours | Long video review sessions. Compensated by 12-hour absolute timeout, heartbeat-based activity, MFA for platform admins (optional for org users), session list with global logout, Cloud Armor rate limiting, and audit logging. |
 
 ## 14. Implementation Phases
 
@@ -239,9 +239,9 @@ Audited actions: login success/failure, logout, lockout, MFA challenge failure, 
 | --- | --- | --- |
 | 1 | Schema and Alembic migrations, RLS policies, project ownership/visibility columns | Done: migration `0001`, RLS matrix tests pass as `pipe1_app` |
 | 2 | Auth core: hashing, login/logout, MFA challenge plumbing, sessions with timeouts and heartbeat, CSRF, throttling, security headers | Done: `server/tests/test_auth_api.py`, `test_security_units.py` |
-| 3 | Invitation, password reset, email change via SendGrid worker | Done (sending verified against a fake provider; real SendGrid needs the account and domain): `test_accounts_api.py`, `test_worker_and_email.py` |
+| 3 | Invitation, password reset, email change via Resend worker | Done (sending verified against a fake provider; real Resend needs the account and domain): `test_accounts_api.py`, `test_worker_and_email.py` |
 | 4 | Authorization layer, scoped queries, signed URLs, visibility UI | Done: `server/tests/test_authorization_matrix.py` (every endpoint × every actor × private/shared project) |
-| 5 | TOTP MFA with recovery codes; enforced for admins | Done: enrollment at first login and from settings, attempt limit, replay rejection, recovery codes, admin reset, disable for inspectors only |
+| 5 | TOTP MFA with recovery codes; enforced for platform admins | Done: enrollment at first login (platform admins) and from settings, attempt limit, replay rejection, recovery codes, admin reset, disable for org users |
 | 6 | Platform-admin and org-admin screens, audit log view, active-session list | Built in `web/`; manual QA in a browser still to do |
 | 7 | Hardening: ASVS L2 review of V2/V3/V4/V13/V14; locked dependencies (`uv.lock`, `package-lock.json`, `.terraform.lock.hcl`, image digests) with automated update PRs; `pip-audit` and `npm audit` and secret scanning in CI; OWASP ZAP scan; external penetration test before first paying customer | In place: lock files, deploy by image digest, Dependabot, `pip-audit`, `npm audit` and gitleaks in `.github/workflows/ci.yml`. Open: ASVS review sign-off, ZAP scan against a deployed environment, external penetration test |
 

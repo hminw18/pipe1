@@ -4,7 +4,6 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 from PIL import Image
-
 from pipe1_core.services.report_service import ReportService
 from pipe1_core.services.thumbnails import EXCEL_MAX_PIXELS, thumbnail_jpeg
 from sewerpipe_inspector.db import Database

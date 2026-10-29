@@ -31,9 +31,11 @@ One Dockerfile (`server/Dockerfile`, built from the repository root) with two ta
 | Target | Runs | Notes |
 | --- | --- | --- |
 | `api` | `pipe1_server.main:app` | No ffmpeg; never parses media. |
-| `worker` | `pipe1_server.worker:app` | ffmpeg; runs jobs (`/internal/tasks/job`), email (`/internal/tasks/email`) and frame capture for the API (`/internal/media/capture`). Deployed twice: `worker` (no internet) and `mailer` (SendGrid only). |
+| `worker` | `pipe1_server.worker:app` | ffmpeg; runs jobs (`/internal/tasks/job`), email (`/internal/tasks/email`) and frame capture for the API (`/internal/media/capture`). Deployed twice: `worker` (no internet) and `mailer` (Resend only). |
 
-In development everything runs in the API process: `PIPE1_JOB_QUEUE=inline`, `PIPE1_MEDIA_CLIENT=local`, `PIPE1_EMAIL_QUEUE=inline`, `PIPE1_EMAIL_SENDER=console` (links are logged), `PIPE1_STORAGE_BACKEND=local`. Production settings refuse to start unless these point at Cloud Tasks, the worker, SendGrid and Cloud Storage. Bootstrap the first platform admin with `uv run python -m pipe1_server.cli invite-platform-admin <email>`.
+In development everything runs in the API process: `PIPE1_JOB_QUEUE=inline` (tests; `background` on the dev VM runs jobs on threads and resumes interrupted ones at startup), `PIPE1_MEDIA_CLIENT=local`, `PIPE1_EMAIL_QUEUE=inline`, `PIPE1_EMAIL_SENDER=console` (links are logged), `PIPE1_STORAGE_BACKEND=local`. Production settings refuse to start unless these point at Cloud Tasks, the worker, Resend and Cloud Storage. Bootstrap the first platform admin with `uv run python -m pipe1_server.cli invite-platform-admin <email>`.
+
+Email queues: `inline` (tests; sends in the caller's thread), `background` (single host such as the dev VM; a thread in the API process sends and retries, so response times never depend on Resend; messages still queued are lost on restart), `cloud_tasks` (production; the mailer sends and Cloud Tasks retries). With `PIPE1_EMAIL_SENDER=resend` the server refuses to start without `PIPE1_RESEND_API_KEY` and a `PIPE1_EMAIL_FROM` on the verified domain. Resend rejections of a message (4xx other than 401/403/408/429, e.g. 422 for an invalid address) are logged and not retried. Check a configuration with `uv run python -m pipe1_server.cli send-test-email <email>`.
 
 ## Database roles
 

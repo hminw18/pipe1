@@ -56,7 +56,8 @@ from pipe1_server.settings import Settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-ADMIN_ROLES = frozenset({"platform_admin", "org_admin"})
+# Only Pipe1 operators must use MFA; everyone else, org admins included, may opt in.
+MFA_REQUIRED_ROLES = frozenset({"platform_admin"})
 LOGIN_FAILED = "이메일 또는 비밀번호가 올바르지 않습니다."
 CODE_FAILED = "인증 코드가 올바르지 않습니다."
 CHALLENGE_EXPIRED = "로그인 시간이 만료되었습니다. 다시 로그인하세요."
@@ -351,7 +352,7 @@ def login(
         credential.hash = upgraded_hash
 
     enrolled = _mfa_enrolled(db, user.id) is not None
-    if enrolled or user.mfa_required or user.role in ADMIN_ROLES:
+    if enrolled or user.mfa_required or user.role in MFA_REQUIRED_ROLES:
         raw, digest = new_token()
         db.add(
             LoginChallenge(
@@ -782,7 +783,7 @@ def disable_mfa(
     active: RecentlyAuthenticated, db: DbSession, ip: ClientIp, user_agent: UserAgent
 ) -> None:
     user = active.user
-    if user.role in ADMIN_ROLES or user.mfa_required:
+    if user.role in MFA_REQUIRED_ROLES or user.mfa_required:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "이 계정은 2단계 인증을 해제할 수 없습니다.")
     db.execute(delete(MfaTotp).where(MfaTotp.user_id == user.id))
     db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == user.id))

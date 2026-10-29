@@ -20,6 +20,7 @@ type Draft = {
   distance_m: string
   manhole_defect_depth_m: string
   memo: string
+  frame: string | null // base64 PNG grabbed from the local file; null: server extracts it
 }
 
 export type DefectPanelApi = {
@@ -41,6 +42,7 @@ const EMPTY: Draft = {
   distance_m: '',
   manhole_defect_depth_m: '',
   memo: '',
+  frame: null,
 }
 
 function numberOrNull(value: string): number | null {
@@ -80,11 +82,13 @@ export const DefectPanel = forwardRef<
     const at = player.current.currentMs()
     setEditing(null)
     setError(null)
-    setDraft((current) => ({ ...current, timestamp_ms: at, distance_m: '' }))
+    const frame = await player.current.captureFrame()
+    setDraft((current) => ({ ...current, timestamp_ms: at, distance_m: '', frame }))
     if (hasRoi) {
       try {
         const suggestion = await post<Schemas['DistanceSuggestion']>(`/api/reports/${reportId}/distance`, {
           timestamp_ms: at,
+          frame_png_base64: frame,
         })
         if (suggestion.distance_m != null) {
           setDraft((current) =>
@@ -124,7 +128,11 @@ export const DefectPanel = forwardRef<
         await patch(`/api/defects/${editing}`, fields)
       } else {
         if (draft.timestamp_ms == null) throw new Error('먼저 화면을 캡처하세요 (C).')
-        await post(`/api/reports/${reportId}/defects`, { ...fields, timestamp_ms: draft.timestamp_ms })
+        await post(`/api/reports/${reportId}/defects`, {
+          ...fields,
+          timestamp_ms: draft.timestamp_ms,
+          frame_png_base64: draft.frame,
+        })
       }
       setDraft({ ...EMPTY, drive_direction: draft.drive_direction, item_category: draft.item_category })
       setEditing(null)
@@ -173,6 +181,7 @@ export const DefectPanel = forwardRef<
       distance_m: String(defect.distance_m),
       manhole_defect_depth_m: defect.manhole_defect_depth_m == null ? '' : String(defect.manhole_defect_depth_m),
       memo: defect.memo ?? '',
+      frame: null,
     })
     player.current?.seekMs(defect.timestamp_ms)
   }

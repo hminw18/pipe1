@@ -16,58 +16,72 @@ import { errorText } from '../errors'
 import { useSession } from '../session/context'
 import { elementRectToVideoRect, videoRectToElementRect, type Rect } from './geometry'
 import { useStopAnalysis, useVideo, type PlayerApi } from './hooks'
-import { uploadVideo } from './upload'
+import { grabFrame, type LocalVideo } from './localVideo'
 
 type Segment = { start_time: number; end_time: number; candidates?: { time?: number; timestamp?: number }[] }
 
 const SPEEDS = [0.5, 1, 2]
 
-function Uploader({ reportId, replacing }: { reportId: string; replacing: boolean }) {
-  const queryClient = useQueryClient()
-  const [progress, setProgress] = useState<number | null>(null)
-  const [error, setError] = useState<string | null>(null)
+function Uploader({
+  label,
+  replacing,
+  busy,
+  onFile,
+}: {
+  label: string
+  replacing: boolean
+  busy: boolean
+  onFile: (file: File) => void
+}) {
   return (
-    <div className="uploader">
-      <label className="file-button">
-        {replacing ? '영상 교체' : '영상 등록'}
-        <input
-          type="file"
-          accept=".avi,.mkv,.mov,.mp4"
-          hidden
-          disabled={progress !== null}
-          onChange={async (event) => {
-            const file = event.target.files?.[0]
-            event.target.value = ''
-            if (!file) return
-            if (replacing && !window.confirm('기존 영상을 교체할까요? 결함과 캡처 이미지는 유지됩니다.')) return
-            setError(null)
-            setProgress(0)
-            try {
-              await uploadVideo(reportId, file, (sent, total) => setProgress(Math.round((sent / total) * 100)))
-              await queryClient.invalidateQueries({ queryKey: keys.video(reportId) })
-              await queryClient.invalidateQueries({ queryKey: keys.report(reportId) })
-            } catch (failure) {
-              setError(errorText(failure))
-            } finally {
-              setProgress(null)
-            }
-          }}
-        />
-      </label>
-      {progress !== null && (
-        <span className="upload-progress">
-          업로드 <span className="mono">{progress}%</span> <progress max={100} value={progress} />
-        </span>
-      )}
-      {error && <span className="error">{error}</span>}
-    </div>
+    <label className="file-button">
+      {label}
+      <input
+        type="file"
+        accept=".avi,.mkv,.mov,.mp4"
+        hidden
+        disabled={busy}
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          event.target.value = ''
+          if (!file) return
+          if (replacing && !window.confirm('기존 영상을 교체할까요? 결함과 캡처 이미지는 유지됩니다.')) return
+          onFile(file)
+        }}
+      />
+    </label>
   )
+}
+
+/** Upload and server-processing state, shown under the player while the local file plays. */
+function LocalStatus({ local, info }: { local: LocalVideo; info: Schemas['VideoOut'] | null | undefined }) {
+  if (local.error) return <p className="job-line error">업로드 실패: {local.error}</p>
+  if (!local.uploaded) {
+    return (
+      <p className="job-line">
+        업로드 <span className="mono">{local.progress}%</span> <progress max={100} value={local.progress} /> 내 PC의 파일로
+        재생 중입니다. 업로드가 끝날 때까지 이 페이지를 닫지 마세요.
+      </p>
+    )
+  }
+  if (info?.transcode_status === 'failed') {
+    return <p className="job-line error">{info.processing_error ?? '영상 처리에 실패했습니다.'}</p>
+  }
+  if (info?.transcode_status !== 'ready') return <p className="job-line">업로드 완료 · 서버에서 영상 처리 중…</p>
+  return null
 }
 
 export const VideoPanel = forwardRef<
   PlayerApi,
-  { reportId: string; canEdit: boolean; defects: Schemas['DefectOut'][]; onTime?: (ms: number) => void }
->(function VideoPanel({ reportId, canEdit, defects, onTime }, ref) {
+  {
+    reportId: string
+    canEdit: boolean
+    defects: Schemas['DefectOut'][]
+    local: LocalVideo | null
+    onFile: (file: File) => void
+    onTime?: (ms: number) => void
+  }
+>(function VideoPanel({ reportId, canEdit, defects, local, onFile, onTime }, ref) {
   const video = useVideo(reportId)
   const analysis = useStopAnalysis(reportId)
   const queryClient = useQueryClient()
@@ -83,9 +97,14 @@ export const VideoPanel = forwardRef<
   const resumeAt = useRef<number | null>(null)
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 })
+  const [elementDuration, setElementDuration] = useState(0)
   const info = video.data
+  const ready = info?.transcode_status === 'ready'
+  // The local file plays from the moment it is chosen; otherwise the processed copy.
+  const src = local?.url ?? (ready ? info?.playback_url : null)
   const fps = info?.fps || 30
-  const durationMs = (info?.duration_seconds ?? 0) * 1000
+  const durationMs = (info?.duration_seconds || elementDuration) * 1000
+  const uploading = Boolean(local && !local.uploaded && !local.error)
 
   const seekMs = useCallback((ms: number) => {
     const node = element.current
@@ -115,8 +134,9 @@ export const VideoPanel = forwardRef<
         const node = element.current
         if (node) node.currentTime = Math.max(0, node.currentTime + seconds)
       },
+      captureFrame: async () => (local && element.current ? grabFrame(element.current) : null),
     }),
-    [fps, seekMs],
+    [fps, seekMs, local],
   )
 
   useEffect(() => {
@@ -131,11 +151,12 @@ export const VideoPanel = forwardRef<
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [info?.transcode_status])
+  }, [src])
 
   // Signed playback URLs last 60 minutes; when one expires mid-review, fetch a fresh one and
   // resume at the same position (docs/Web_Auth_Spec.md §10).
   const onError = async () => {
+    if (local) return
     resumeAt.current = Math.round((element.current?.currentTime ?? 0) * 1000)
     await queryClient.invalidateQueries({ queryKey: keys.video(reportId) })
   }
@@ -181,10 +202,10 @@ export const VideoPanel = forwardRef<
   const header = (
     <header>
       <h2>영상</h2>
-      {info && (
+      {(info || local) && (
         <span className="meta">
-          {info.original_filename}
-          {info.transcode_status === 'ready' && (
+          {local?.name ?? info?.original_filename}
+          {info && ready && (
             <span className="mono">
               {' · '}
               {info.width && info.height ? `${info.width}×${info.height} · ` : ''}
@@ -205,41 +226,42 @@ export const VideoPanel = forwardRef<
       </section>
     )
   }
-  if (!info) {
+  if (!src) {
     return (
       <section className="ws-section">
         {header}
         <div className="video-empty">
-          <p>등록된 영상이 없습니다.</p>
-          {canEdit && <Uploader reportId={reportId} replacing={false} />}
-        </div>
-      </section>
-    )
-  }
-  if (info.transcode_status !== 'ready') {
-    return (
-      <section className="ws-section">
-        {header}
-        <div className="video-empty">
-          {info.transcode_status === 'failed' ? (
+          {!info ? (
+            <p>등록된 영상이 없습니다.</p>
+          ) : info.transcode_status === 'failed' ? (
             <p className="error">{info.processing_error ?? '영상 처리에 실패했습니다.'}</p>
+          ) : info.transcode_status === 'uploading' ? (
+            <p>업로드가 끝나지 않았습니다. 영상 파일을 다시 선택하면 바로 재생하며 다시 올립니다.</p>
           ) : (
             <p>
-              영상 처리 중입니다… <span className="mono">{formatBytes(info.size_bytes)}</span>
+              서버에서 영상 처리 중입니다… <span className="mono">{formatBytes(info.size_bytes)}</span> 원본 파일을
+              선택하면 기다리지 않고 바로 검토할 수 있습니다.
             </p>
           )}
-          {canEdit && <Uploader reportId={reportId} replacing />}
+          {canEdit && (
+            <Uploader
+              label={!info ? '영상 등록' : info.transcode_status === 'failed' ? '영상 교체' : '영상 파일 선택'}
+              replacing={false}
+              busy={false}
+              onFile={onFile}
+            />
+          )}
         </div>
       </section>
     )
   }
 
   const intrinsic = {
-    width: videoSize.width || info.width || 0,
-    height: videoSize.height || info.height || 0,
+    width: videoSize.width || info?.width || 0,
+    height: videoSize.height || info?.height || 0,
   }
   const savedRoi =
-    info.depth_roi && stageSize.width && intrinsic.width
+    info?.depth_roi && stageSize.width && intrinsic.width
       ? videoRectToElementRect(
           { x: info.depth_roi[0], y: info.depth_roi[1], w: info.depth_roi[2], h: info.depth_roi[3] },
           stageSize,
@@ -279,13 +301,14 @@ export const VideoPanel = forwardRef<
         >
           <video
             ref={element}
-            src={info.playback_url ?? undefined}
+            src={src ?? undefined}
             preload="metadata"
             crossOrigin="anonymous"
             onPlay={() => setPlaying(true)}
             onPause={() => setPlaying(false)}
             onLoadedMetadata={(event) => {
               setVideoSize({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight })
+              setElementDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)
               if (resumeAt.current !== null) {
                 seekMs(resumeAt.current)
                 resumeAt.current = null
@@ -310,7 +333,7 @@ export const VideoPanel = forwardRef<
             seekMs(((event.clientX - box.left) / box.width) * durationMs)
           }}
         >
-          {info.thumbnail_url && <img src={info.thumbnail_url} alt="" className="timeline-strip" />}
+          {info?.thumbnail_url && <img src={info.thumbnail_url} alt="" className="timeline-strip" />}
           {segments.map((segment, index) => (
             <div
               key={`s${index}`}
@@ -426,14 +449,16 @@ export const VideoPanel = forwardRef<
               )}
               <button
                 onClick={() => void startAnalysis()}
-                disabled={latestJob?.status === 'queued' || latestJob?.status === 'running'}
+                disabled={!ready || latestJob?.status === 'queued' || latestJob?.status === 'running'}
+                title={ready ? undefined : '업로드와 서버 처리가 끝나면 분석할 수 있습니다'}
               >
                 의심구간 분석
               </button>
-              <Uploader reportId={reportId} replacing />
+              <Uploader label="영상 교체" replacing={Boolean(info)} busy={uploading} onFile={onFile} />
             </>
           )}
         </div>
+        {local && <LocalStatus local={local} info={info} />}
         {drawing && <p className="job-line">영상 위에서 거리 숫자가 표시되는 영역을 드래그한 뒤 저장하세요.</p>}
         {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') && (
           <p className="job-line">

@@ -1,6 +1,6 @@
 # Dev/test environment on a single VM: https://pipe1dev.cloud
 # Not the production architecture (docs/Web_Architecture.md): everything runs in one app
-# container (jobs, media processing and email inline; emails go to the log).
+# container (jobs, media processing and email on background threads).
 #
 #   ./setup.sh                 # once: generates .env with random secrets
 #   docker compose up -d --build
@@ -32,6 +32,8 @@ services:
     environment:
       PIPE1_MIGRATION_DATABASE_URL: postgresql+psycopg://pipe1_migrator@postgres/pipe1
       PGPASSWORD: ${PIPE1_MIGRATOR_DB_PASSWORD}
+      # Migrations send no email; keep the email settings in .env from failing validation here.
+      PIPE1_EMAIL_SENDER: console
     command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres:
@@ -52,10 +54,14 @@ services:
       PGPASSWORD: ${PIPE1_APP_DB_PASSWORD}
       PIPE1_STORAGE_BACKEND: local
       PIPE1_LOCAL_STORAGE_DIR: /data/storage
-      PIPE1_JOB_QUEUE: inline
+      # Jobs run on threads in this process; a restart resumes unfinished ones.
+      PIPE1_JOB_QUEUE: background
       PIPE1_MEDIA_CLIENT: local
-      PIPE1_EMAIL_QUEUE: inline
-      PIPE1_EMAIL_SENDER: console
+      # Emails are sent from a background thread so responses never wait for Resend.
+      # Without PIPE1_EMAIL_SENDER=resend (and PIPE1_RESEND_API_KEY) in .env they go to the log.
+      PIPE1_EMAIL_QUEUE: background
+      PIPE1_EMAIL_SENDER: ${PIPE1_EMAIL_SENDER:-console}
+      PIPE1_EMAIL_FROM: ${PIPE1_EMAIL_FROM:-Pipe1 <no-reply@pipe1dev.cloud>}
       PIPE1_BREACHED_PASSWORD_SOURCE: hibp
       # Caddy appends the client address to X-Forwarded-For.
       PIPE1_TRUSTED_PROXY_HOPS: "1"

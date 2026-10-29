@@ -403,7 +403,6 @@ def change_role(
             raise HTTPException(status.HTTP_409_CONFLICT, "마지막 관리자는 변경할 수 없습니다.")
     previous = target.role
     target.role = body.role
-    target.mfa_required = body.role == "org_admin" or target.mfa_required
     revoke_all_for_user(db, target.id, now)
     audit.record(
         db,
