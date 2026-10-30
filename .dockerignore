@@ -1,4 +1,4 @@
-# Only core/, server/, and the report assets go into images.
+# Only core/, server/, the report assets and the OCR model go into images.
 **/.venv
 **/node_modules
 **/__pycache__

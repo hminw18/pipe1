@@ -12,6 +12,10 @@ dependencies = [
   "reportlab>=4.2.0",
 ]
 
+[project.optional-dependencies]
+# Text recognizer for the depth counter (stop_detection/text_reader.py).
+ocr = ["onnxruntime>=1.20"]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

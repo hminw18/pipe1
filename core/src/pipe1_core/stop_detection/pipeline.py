@@ -102,10 +102,15 @@ def run_stop_analysis(
 
     report(0, "거리 OCR 준비")
     started = time.perf_counter()
-    stop_segments = DepthOcrStopSegmentDetector(DEPTH_CONFIG).analyze(
-        video_path, depth_roi, progress_callback=depth_progress
+    depth_detector = DepthOcrStopSegmentDetector(DEPTH_CONFIG)
+    stop_segments = depth_detector.analyze(
+        video_path,
+        depth_roi,
+        progress_callback=depth_progress,
+        max_workers=max_workers or default_worker_count(),
     )
     benchmark["depth_seconds"] = time.perf_counter() - started
+    benchmark["depth"] = depth_detector.last_stats
 
     candidate_started = time.perf_counter()
     analyzed: list[dict[str, object]] = []

@@ -28,6 +28,8 @@ COPY --from=build /app/.venv /app/.venv
 # Assets used by the PDF/Excel generators (pipe template, calibration, Korean fonts).
 COPY pipe.png pipe_template_calibration.json /app/resources/
 COPY font/ /app/resources/font/
+# Depth counter text recognizer (models/ocr/README.md).
+COPY models/ /app/resources/models/
 COPY server/alembic.ini /app/alembic.ini
 COPY server/migrations/ /app/migrations/
 ENV PATH="/app/.venv/bin:$PATH" \

@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import logging
+import math
 import time
 import zlib
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 import cv2
 import numpy as np
 
+from . import keyframes
 from .depth_template_data import (
     COMMON_DEPTH_TEMPLATE_DTYPE,
     COMMON_DEPTH_TEMPLATE_SHAPE,
     COMMON_DEPTH_TEMPLATE_ZLIB_BASE64,
 )
+from .keyframes import KeyframeError
 from .video_capture import open_analysis_video_capture
-
 
 BASE_ROI_SIZE = (149, 53)
 BASE_DIGIT_SLOTS = (
@@ -60,12 +64,14 @@ class DepthOcrStopDetectionConfig:
     max_missing_bridge_seconds: float = 3.0
     min_digit_score: float = 0.5
     min_digit_margin: float = 0.0
+    # Read keyframes first and decode only where needed (requires the ffmpeg command).
+    keyframe_first: bool = True
 
 
 @dataclass(frozen=True)
 class DepthOcrResult:
     value: float
-    digits: tuple[int, int, int, int]
+    digits: tuple[int, ...]  # empty when read by the text recognizer
     min_score: float
     min_margin: float
 
@@ -260,7 +266,19 @@ def _load_template_matrix() -> np.ndarray:
     return matrix
 
 
+class DepthReader(Protocol):
+    def read_depth_value(
+        self,
+        roi_image: np.ndarray,
+        slots: tuple[tuple[int, int, int, int], ...] | None = None,
+    ) -> DepthOcrResult | None: ...
+
+
 class CommonDepthDigitMatcher:
+    """Matches the four digits of one recorder's ddd.d counter against stored templates."""
+
+    uses_slots = True
+
     def __init__(self) -> None:
         self.template_matrix = _load_template_matrix()
 
@@ -420,17 +438,21 @@ class DepthOcrStopSegmentDetector:
     def __init__(
         self,
         config: DepthOcrStopDetectionConfig | None = None,
-        matcher: CommonDepthDigitMatcher | None = None,
+        matcher: DepthReader | None = None,
     ) -> None:
+        from .text_reader import default_depth_reader  # imports this module
+
         self.config = config or DepthOcrStopDetectionConfig()
-        self.matcher = matcher or CommonDepthDigitMatcher()
+        self.matcher = matcher or default_depth_reader()
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.last_stats: dict[str, object] = {}
 
     def analyze(
         self,
         video_path: str,
         depth_roi: tuple[int, int, int, int],
         progress_callback: Callable[[int, int, str], None] | None = None,
+        max_workers: int = 1,
     ) -> list[dict[str, float]]:
         started = time.perf_counter()
         path = Path(video_path)
@@ -441,8 +463,21 @@ class DepthOcrStopSegmentDetector:
         if not cap.isOpened():
             raise ValueError(f"Cannot open video: {video_path}")
 
-        samples = self._read_depth_samples(cap, depth_roi, progress_callback)
-        cap.release()
+        try:
+            if progress_callback is not None:
+                progress_callback(0, 1, "거리 OCR 보정")
+            slots = None
+            if getattr(self.matcher, "uses_slots", True):
+                slots = self._calibrate_digit_slots(cap, depth_roi)
+            samples: list[DepthSample] | None = None
+            if self.config.keyframe_first and keyframes.ffmpeg_available():
+                samples = self._read_depth_samples_keyframe_first(
+                    path, cap, depth_roi, slots, progress_callback, max_workers
+                )
+            if samples is None:
+                samples = self._read_depth_samples(cap, depth_roi, slots, progress_callback)
+        finally:
+            cap.release()
 
         if progress_callback is not None:
             progress_callback(1, 1, "거리 OCR 결과 정리")
@@ -461,12 +496,35 @@ class DepthOcrStopSegmentDetector:
         )
         return segments
 
+    def _sample(
+        self,
+        timestamp: float,
+        roi_image: np.ndarray,
+        slots: tuple[tuple[int, int, int, int], ...] | None,
+    ) -> DepthSample:
+        result = self.matcher.read_depth_value(roi_image, slots)
+        if result is None:
+            return DepthSample(timestamp, None, None, None, None)
+        confident = (
+            result.min_score >= self.config.min_digit_score
+            and result.min_margin >= self.config.min_digit_margin
+        )
+        return DepthSample(
+            time=timestamp,
+            raw_value=result.value,
+            value=result.value if confident else None,
+            min_score=result.min_score,
+            min_margin=result.min_margin,
+        )
+
     def _read_depth_samples(
         self,
         cap: cv2.VideoCapture,
         depth_roi: tuple[int, int, int, int],
+        slots: tuple[tuple[int, int, int, int], ...] | None,
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> list[DepthSample]:
+        """Decode every frame and read the counter once per sample period."""
         native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         sample_fps = max(0.1, float(self.config.fps))
         sample_period = 1.0 / sample_fps
@@ -475,16 +533,14 @@ class DepthOcrStopSegmentDetector:
         x, y, w, h = depth_roi
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         progress_interval = max(1, int(round(max(native_fps, 1.0) * 2.0)))
-        if progress_callback is not None:
-            progress_callback(0, max(1, frame_count), "거리 OCR 보정")
-        calibrated_slots = self._calibrate_digit_slots(cap, depth_roi)
+        next_progress = progress_interval
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         samples: list[DepthSample] = []
 
         while True:
             timestamp = frame_index / native_fps if native_fps > 0 else next_sample_time
             sampled = timestamp + 1e-9 >= next_sample_time
-            # grab() advances without converting the frame; only sampled frames are decoded.
+            # grab() skips the colour conversion, but the frame is still decoded.
             if sampled:
                 ok, frame = cap.read()
             else:
@@ -492,46 +548,152 @@ class DepthOcrStopSegmentDetector:
             if not ok:
                 break
             if sampled:
-                roi_image = frame[y : y + h, x : x + w]
-                result = self.matcher.read_depth_value(roi_image, calibrated_slots)
-                raw_value: float | None = None
-                value: float | None = None
-                min_score: float | None = None
-                min_margin: float | None = None
-                if result is not None:
-                    raw_value = result.value
-                    min_score = result.min_score
-                    min_margin = result.min_margin
-                    if (
-                        result.min_score >= self.config.min_digit_score
-                        and result.min_margin >= self.config.min_digit_margin
-                    ):
-                        value = result.value
-                samples.append(
-                    DepthSample(
-                        time=timestamp,
-                        raw_value=raw_value,
-                        value=value,
-                        min_score=min_score,
-                        min_margin=min_margin,
-                    )
-                )
+                samples.append(self._sample(timestamp, frame[y : y + h, x : x + w], slots))
                 next_sample_time += sample_period
-                if (
-                    progress_callback is not None
-                    and frame_count > 0
-                    and frame_index % progress_interval == 0
-                ):
-                    progress_callback(
-                        frame_index,
-                        frame_count,
-                        f"거리 OCR 샘플 {len(samples)}개",
-                    )
             frame_index += 1
+            if progress_callback is not None and frame_count > 0 and frame_index >= next_progress:
+                next_progress += progress_interval
+                progress_callback(frame_index, frame_count, f"거리 OCR 샘플 {len(samples)}개")
 
+        self.last_stats = {
+            "mode": "sequential",
+            "frames": frame_count,
+            "decoded_frames": frame_index,
+        }
         if progress_callback is not None:
             progress_callback(max(frame_index, frame_count), max(1, frame_count), "거리 OCR 완료")
         return samples
+
+    def _read_depth_samples_keyframe_first(
+        self,
+        path: Path,
+        cap: cv2.VideoCapture,
+        depth_roi: tuple[int, int, int, int],
+        slots: tuple[tuple[int, int, int, int], ...] | None,
+        progress_callback: Callable[[int, int, str], None] | None,
+        max_workers: int,
+    ) -> list[DepthSample] | None:
+        """The same samples as _read_depth_samples, decoding far fewer frames.
+
+        Reads the counter on keyframes only. Where two neighbouring keyframes show the same
+        distance (camera stopped), the sample frames between them get that reading; everywhere
+        else they are decoded and read, because estimating a moving counter shifts stop
+        boundaries. Returns None to fall back to decoding every frame.
+        """
+        native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        x, y, w, h = depth_roi
+        # numpy slicing clips the region to the frame; ffmpeg's crop needs it clipped first.
+        x0, y0, x1, y1 = max(0, x), max(0, y), min(frame_w, x + w), min(frame_h, y + h)
+        if native_fps <= 0 or frame_count <= 0 or x1 <= x0 or y1 <= y0:
+            return None
+        period = 1.0 / max(0.1, float(self.config.fps))
+        duration = frame_count / native_fps
+
+        def report(fraction: float, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(int(max(0.0, min(1.0, fraction)) * 1000), 1000, message)
+
+        keys: dict[int, DepthSample] = {}
+        try:
+            for timestamp, crop in keyframes.keyframe_crops(
+                path, (x0, y0, x1 - x0, y1 - y0), min_spacing_seconds=period * 0.9
+            ):
+                index = int(round(timestamp * native_fps))
+                if 0 <= index < frame_count and index not in keys:
+                    keys[index] = self._sample(index / native_fps, crop, slots)
+                report(0.4 * timestamp / duration, f"거리 OCR 키프레임 {len(keys)}개")
+        except (KeyframeError, OSError) as error:
+            self.logger.warning("Keyframe pass failed, decoding every frame: %s", error)
+            return None
+        if len(keys) < 2:
+            return None
+
+        # Sample frames, chosen exactly as _read_depth_samples chooses them.
+        grid: list[int] = []
+        while (index := math.ceil((len(grid) * period - 1e-9) * native_fps)) < frame_count:
+            grid.append(index)
+
+        starts = sorted(keys)
+        spans: list[tuple[int, int, DepthSample | None, DepthSample | None]] = []
+        if starts[0] > 0:
+            spans.append((0, starts[0], None, keys[starts[0]]))
+        for start, end in zip(starts, [*starts[1:], frame_count], strict=True):
+            spans.append((start, end, keys[start], keys.get(end)))
+
+        samples: dict[int, DepthSample] = {}
+        to_decode: list[tuple[int, int]] = []
+        for start, end, left, right in spans:
+            points = grid[bisect.bisect_left(grid, start) : bisect.bisect_left(grid, end)]
+            if not points:
+                continue
+            if left is not None and right is not None and left.value == right.value:
+                # Stopped, or the counter is unreadable at both ends: repeat the left reading.
+                for index in points:
+                    samples[index] = replace(left, time=index / native_fps)
+                continue
+            if to_decode and to_decode[-1][1] == start:
+                to_decode[-1] = (to_decode[-1][0], end)
+            else:
+                to_decode.append((start, end))
+
+        decoded = 0
+        total = sum(end - start for start, end in to_decode) or 1
+
+        def decode(span: tuple[int, int]) -> tuple[int, dict[int, DepthSample]]:
+            start, end = span
+            points = grid[bisect.bisect_left(grid, start) : bisect.bisect_left(grid, end)]
+            found = self._decode_samples(path, start, points, native_fps, depth_roi, slots)
+            return end - start, found
+
+        with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+            for frames, found in executor.map(decode, to_decode):
+                samples.update(found)
+                decoded += frames
+                report(0.4 + 0.6 * decoded / total, f"거리 OCR 정밀 확인 {decoded}/{total} 프레임")
+
+        self.last_stats = {
+            "mode": "keyframe_first",
+            "frames": frame_count,
+            "keyframes": len(keys),
+            "decoded_frames": decoded,
+        }
+        report(1.0, "거리 OCR 완료")
+        return [samples[index] for index in grid if index in samples]
+
+    def _decode_samples(
+        self,
+        path: Path,
+        start: int,
+        points: list[int],
+        native_fps: float,
+        depth_roi: tuple[int, int, int, int],
+        slots: tuple[tuple[int, int, int, int], ...] | None,
+    ) -> dict[int, DepthSample]:
+        if not points:
+            return {}
+        x, y, w, h = depth_roi
+        wanted = set(points)
+        cap = open_analysis_video_capture(path)
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+            found: dict[int, DepthSample] = {}
+            for index in range(start, points[-1] + 1):
+                if index in wanted:
+                    ok, frame = cap.read()
+                    if ok:
+                        found[index] = self._sample(
+                            index / native_fps, frame[y : y + h, x : x + w], slots
+                        )
+                else:
+                    ok = cap.grab()
+                if not ok:
+                    break
+            return found
+        finally:
+            cap.release()
 
     def _calibrate_digit_slots(
         self,

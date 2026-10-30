@@ -415,14 +415,19 @@ class JobRunner:
             if video.depth_roi_x is None:
                 raise UserFacingError("먼저 깊이 영역을 저장하세요.")
             roi = (video.depth_roi_x, video.depth_roi_y, video.depth_roi_w, video.depth_roi_h)
-            original_key = video.original_object_key
+            # The playback copy: the frames and timestamps the player and captures use, and
+            # keyframes at most 2 s apart when it was re-encoded.
+            playback_key = video.playback_object_key
         progress = self._progress(user, job_id)
         with tempfile.TemporaryDirectory(prefix="pipe1-analysis-") as tmp:
-            # Stop analysis seeks repeatedly from several threads; a local copy is far faster
-            # and more reliable than streaming over HTTPS.
-            path = Path(tmp) / "original"
-            progress(1, "영상 내려받는 중")
-            self._store.download_to(original_key, path)
+            if isinstance(self._store, LocalObjectStore):
+                path = self._store.path_for(playback_key)
+            else:
+                # Stop analysis seeks repeatedly from several threads; a local copy is far
+                # faster and more reliable than streaming over HTTPS.
+                path = Path(tmp) / "playback.mp4"
+                progress(1, "영상 내려받는 중")
+                self._store.download_to(playback_key, path)
             result = run_stop_analysis(str(path), roi, progress=progress)
         return {"segments": result.segments, "benchmark": result.benchmark}
 

@@ -1,6 +1,6 @@
 # Tests
 
-What each automated test protects, and why it exists. 201 Python test functions (138 server, 63 desktop/core) and 17 frontend tests.
+What each automated test protects, and why it exists. 207 Python test functions (143 server, 64 desktop/core) and 17 frontend tests.
 
 ## Running them
 
@@ -141,6 +141,18 @@ Uses real ffmpeg on small generated videos.
 | `test_unusable_browser_frames_are_rejected` | Non-PNG, truncated, or huge-dimension frames are refused before decoding. |
 | `test_interrupted_jobs_are_resumed_at_startup` | On the dev VM, jobs cut off by a restart run again. |
 
+### Depth counter reading: `test_depth_counter_reader.py`
+
+No database needed. Protects the distances that stop analysis and captures fill in.
+
+| Test | Guarantees |
+|---|---|
+| `test_server_reads_the_counter_with_the_text_recognizer` | The server uses the text recognizer, not the one-recorder digit templates (the model file and onnxruntime are present). |
+| `test_reads_real_counter` (10 images) | Counters cut from a real inspection video read correctly: white and light backgrounds, smudged and blurred digits, and 7s and 3s that are misread as 9s and 8s without the black border added around the region. |
+| `test_reads_other_counter_formats` | Other formats and fonts (`12.3`, `013.50m`, `128.0 M`, `0045.7m`) read correctly. |
+| `test_text_that_is_not_one_number_is_not_a_distance` | Garbled readings become "unreadable", never a wrong distance. |
+| `test_capture_distance_is_read_from_the_counter_region` | A capture's distance is read from the user's depth region of the frame. |
+
 ### Email and worker: `test_worker_and_email.py`
 
 | Test | Guarantees |
@@ -191,7 +203,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 | File | Guarantees |
 |---|---|
 | `test_frame_candidate_detector.py` (2) | Candidate frames are found after motion bursts, at most the configured number per stop. |
-| `test_depth_ocr_stop_detector.py` (3) | Digit slots of the depth counter are located (also with loose ROIs); depth series become stop segments with short gaps bridged. |
+| `test_depth_ocr_stop_detector.py` (4) | Digit slots of the depth counter are located (also with loose ROIs); depth series become stop segments with short gaps bridged; reading keyframes first finds exactly the stops that decoding every frame finds (including a short stop spanning a keyframe and an unreadable stretch), with far fewer frames decoded. |
 | `test_depth.py` (3) | Distance OCR is positive on a real report video, falls back to Tesseract, returns nothing when both fail. |
 | `test_video_capture.py` (1) | Opening a video falls back to the default backend when ffmpeg fails. |
 

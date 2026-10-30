@@ -1,6 +1,12 @@
+import shutil
+import subprocess
+from pathlib import Path
+
 import cv2
 import numpy as np
+import pytest
 from pipe1_core.stop_detection.depth_ocr_detector import (
+    DepthOcrResult,
     DepthOcrStopDetectionConfig,
     DepthOcrStopSegmentDetector,
     DepthSample,
@@ -86,3 +92,110 @@ def test_depth_series_extracts_stop_segments_and_bridges_short_missing() -> None
         {"start_time": 0.0, "end_time": 6.0, "duration": 6.0, "distance_m": 0.0},
         {"start_time": 6.0, "end_time": 12.0, "duration": 6.0, "distance_m": 1.2},
     ]
+
+
+# Distance over time for a synthetic inspection: stops (one only 3.5 s long, spanning a
+# keyframe), movement at 1 m/s, and a stretch where the counter is unreadable. Sample
+# times are whole seconds, where every distance is a multiple of 0.5 m.
+_PROFILE = [
+    (0.0, 6.0, 0.0, 0.0),
+    (6.0, 8.0, 0.0, 2.0),
+    (8.0, 11.5, 2.0, 2.0),
+    (11.5, 13.5, 2.0, 4.0),
+    (13.5, 18.0, 4.0, 4.0),
+    (18.0, 21.0, None, None),
+    (21.0, 24.0, 4.0, 4.0),
+    (24.0, 31.0, 4.0, 11.0),
+    (31.0, 40.0, 11.0, 11.0),
+]
+_ROI = (20, 20, 60, 30)
+
+
+def _distance_at(seconds: float) -> float | None:
+    for start, end, first, last in _PROFILE:
+        if start <= seconds < end:
+            if first is None or last is None:
+                return None
+            return round(2 * (first + (last - first) * (seconds - start) / (end - start))) / 2
+    return _PROFILE[-1][3]
+
+
+class _BrightnessCounter:
+    """Stands in for the digit matcher: the counter region's brightness encodes the distance."""
+
+    def read_depth_value(self, roi_image, slots):
+        level = float(roi_image.mean())
+        if level < 10:
+            return None
+        # Encoding shifts brightness by a few levels; distances are multiples of 0.5 m.
+        return DepthOcrResult(round((level - 20) / 10) / 2, (0, 0, 0, 0), 1.0, 1.0)
+
+
+def _write_profile_video(path: Path, fps: int = 30) -> None:
+    x, y, w, h = _ROI
+    encoder = subprocess.Popen(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            "160x90",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-qp",
+            "0",
+            "-g",
+            str(2 * fps),
+            "-keyint_min",
+            str(2 * fps),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            str(path),
+        ],
+        stdin=subprocess.PIPE,
+    )
+    assert encoder.stdin is not None
+    for index in range(int(_PROFILE[-1][1] * fps)):
+        frame = np.full((90, 160, 3), 128, dtype=np.uint8)
+        distance = _distance_at(index / fps)
+        frame[y : y + h, x : x + w] = 0 if distance is None else int(round(20 + distance * 20))
+        encoder.stdin.write(frame.tobytes())
+    encoder.stdin.close()
+    assert encoder.wait() == 0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs the ffmpeg command")
+def test_keyframe_first_reading_finds_the_same_stops_with_less_decoding(tmp_path: Path) -> None:
+    video = tmp_path / "inspection.mp4"
+    _write_profile_video(video)
+
+    def detect(keyframe_first: bool):
+        config = DepthOcrStopDetectionConfig(keyframe_first=keyframe_first)
+        detector = DepthOcrStopSegmentDetector(config, matcher=_BrightnessCounter())
+        return detector.analyze(str(video), _ROI, max_workers=2), detector.last_stats
+
+    every_frame, every_frame_stats = detect(keyframe_first=False)
+    fast, fast_stats = detect(keyframe_first=True)
+
+    # The unreadable 3 s are bridged; the 3.5 s stop spans a keyframe.
+    assert [(s["start_time"], s["end_time"], s["distance_m"]) for s in every_frame] == [
+        (0.0, 7.0, 0.0),
+        (8.0, 13.0, 2.0),
+        (13.0, 25.0, 4.0),
+        (31.0, 40.0, 11.0),
+    ]
+    assert fast == every_frame
+    assert fast_stats["mode"] == "keyframe_first"
+    # Mostly movement, which is decoded; real inspections are mostly stopped.
+    assert fast_stats["decoded_frames"] <= every_frame_stats["decoded_frames"] / 2

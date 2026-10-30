@@ -7,9 +7,8 @@ from typing import Optional
 
 import cv2
 
-from pipe1_core.stop_detection.depth_ocr_detector import (
-    CommonDepthDigitMatcher,
-)
+from pipe1_core.stop_detection.depth_ocr_detector import DepthReader
+from pipe1_core.stop_detection.text_reader import default_depth_reader
 
 try:
     import pytesseract
@@ -81,12 +80,12 @@ def _extract_best_number(text: str) -> Optional[float]:
 class OCRService:
     def __init__(
         self,
-        matcher: CommonDepthDigitMatcher | None = None,
+        matcher: DepthReader | None = None,
         min_digit_score: float = DEFAULT_MIN_DIGIT_SCORE,
         min_digit_margin: float = DEFAULT_MIN_DIGIT_MARGIN,
         tesseract_reader: Callable[[object, str], str] | None = None,
     ) -> None:
-        self.matcher = matcher or CommonDepthDigitMatcher()
+        self.matcher = matcher or default_depth_reader()
         self.min_digit_score = min_digit_score
         self.min_digit_margin = min_digit_margin
         self.tesseract_reader = tesseract_reader
@@ -126,7 +125,7 @@ class OCRService:
         try:
             result = self.matcher.read_depth_value(crop, None)
         except Exception:
-            self.logger.exception("OpenCV depth OCR failed")
+            self.logger.exception("Depth reader failed")
             return None
 
         if result is None:

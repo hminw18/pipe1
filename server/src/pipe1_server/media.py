@@ -284,7 +284,7 @@ def normalize_frame_png(data: bytes) -> bytes:
 
 
 def read_distance(png: bytes, roi: tuple[int, int, int, int]) -> float | None:
-    """Depth counter reading in the region of interest (desktop OCR, template matching)."""
+    """Depth counter reading in the region of interest (text recognizer, see text_reader.py)."""
     import cv2
     import numpy as np
     from pipe1_core.services.ocr_service import OCRService
