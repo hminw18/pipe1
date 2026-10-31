@@ -104,6 +104,8 @@ export const VideoPanel = forwardRef<
   const src = local?.url ?? (ready ? info?.playback_url : null)
   const fps = info?.fps || 30
   const durationMs = (info?.duration_seconds || elementDuration) * 1000
+  // The clock keeps one format for the whole video: hours appear only for videos of an hour or more.
+  const longVideo = durationMs >= 3_600_000
   const uploading = Boolean(local && !local.uploaded && !local.error)
 
   const seekMs = useCallback((ms: number) => {
@@ -333,7 +335,7 @@ export const VideoPanel = forwardRef<
             seekMs(((event.clientX - box.left) / box.width) * durationMs)
           }}
         >
-          {info?.thumbnail_url && <img src={info.thumbnail_url} alt="" className="timeline-strip" />}
+          <div className="timeline-played" ref={(node) => positionFill(node, timeMs, durationMs)} />
           {segments.map((segment, index) => (
             <div
               key={`s${index}`}
@@ -408,7 +410,7 @@ export const VideoPanel = forwardRef<
             ))}
           </select>
           <span className="time">
-            {formatTimestamp(timeMs)} <span className="total">/ {formatTimestamp(durationMs)}</span>
+            {formatTimestamp(timeMs, longVideo)} <span className="total">/ {formatTimestamp(durationMs, longVideo)}</span>
           </span>
           <span className="keys" aria-hidden="true">
             <span className="kbd">Space</span>
@@ -520,6 +522,10 @@ function positionBox(node: HTMLElement | null, rect: Rect) {
 
 function positionAt(node: HTMLElement | null, ms: number, durationMs: number) {
   if (node && durationMs > 0) node.style.left = `${Math.min(100, (ms / durationMs) * 100)}%`
+}
+
+function positionFill(node: HTMLElement | null, ms: number, durationMs: number) {
+  if (node && durationMs > 0) node.style.width = `${Math.min(100, (ms / durationMs) * 100)}%`
 }
 
 function positionSpan(node: HTMLElement | null, startMs: number, endMs: number, durationMs: number) {

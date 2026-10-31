@@ -28,7 +28,6 @@ from pipe1_server.media import ACCEPTED_EXTENSIONS
 from pipe1_server.models.inspection import MediaJob, ReportVideo, VideoUpload
 from pipe1_server.security import audit
 from pipe1_server.storage import (
-    IMAGE_URL_TTL,
     UPLOAD_SESSION_TTL,
     VIDEO_URL_TTL,
     LocalObjectStore,
@@ -73,8 +72,6 @@ class VideoOut(BaseModel):
     depth_roi: tuple[int, int, int, int] | None
     playback_url: str | None
     playback_url_expires_in: int | None
-    thumbnail_url: str | None
-    thumbnail_interval_seconds: float | None
 
 
 class DepthRoi(BaseModel):
@@ -114,10 +111,6 @@ def video_out(video: ReportVideo, store) -> VideoOut:
         if ready and video.playback_object_key
         else None,
         playback_url_expires_in=int(VIDEO_URL_TTL.total_seconds()) if ready else None,
-        thumbnail_url=store.signed_download_url(video.thumbnail_object_key, IMAGE_URL_TTL)
-        if ready and video.thumbnail_object_key
-        else None,
-        thumbnail_interval_seconds=video.thumbnail_interval_seconds,
     )
 
 
@@ -256,19 +249,10 @@ def complete_upload(
         video.original_filename = upload.original_filename
     else:
         # Keep the row (defects reference it); swap the media and reset processing.
-        replaced_keys = {
-            k
-            for k in (
-                video.original_object_key,
-                video.playback_object_key,
-                video.thumbnail_object_key,
-            )
-            if k
-        }
+        replaced_keys = {k for k in (video.original_object_key, video.playback_object_key) if k}
         video.original_object_key = upload.object_key
         video.original_filename = upload.original_filename
         video.playback_object_key = None
-        video.thumbnail_object_key = None
         video.duration_seconds = video.fps = None
         video.width = video.height = None
     video.size_bytes = size
@@ -284,26 +268,16 @@ def complete_upload(
     )
     db.add(job)
     db.flush()
-    still_used = (
-        set(
-            db.scalars(
-                select(ReportVideo.original_object_key).where(
-                    ReportVideo.original_object_key.in_(replaced_keys)
-                )
+    still_used = set(
+        db.scalars(
+            select(ReportVideo.original_object_key).where(
+                ReportVideo.original_object_key.in_(replaced_keys)
             )
         )
-        | set(
-            db.scalars(
-                select(ReportVideo.playback_object_key).where(
-                    ReportVideo.playback_object_key.in_(replaced_keys)
-                )
-            )
-        )
-        | set(
-            db.scalars(
-                select(ReportVideo.thumbnail_object_key).where(
-                    ReportVideo.thumbnail_object_key.in_(replaced_keys)
-                )
+    ) | set(
+        db.scalars(
+            select(ReportVideo.playback_object_key).where(
+                ReportVideo.playback_object_key.in_(replaced_keys)
             )
         )
     )

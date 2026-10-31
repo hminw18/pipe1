@@ -246,6 +246,19 @@ export const DefectPanel = forwardRef<
                 <option value="condition">상태</option>
               </select>
             </label>
+            {draft.kind === 'condition' && (
+              <label className="item-select">
+                상태 항목
+                <select value={draft.condition_item} onChange={(e) => setDraft({ ...draft, condition_item: e.target.value })}>
+                  <option value="">선택</option>
+                  {category?.condition_items.map((c) => (
+                    <option key={c.item} value={c.item}>
+                      {c.item} {c.code}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             {draft.kind === 'defect' && (
               <>
                 <label className="item-select">
@@ -260,9 +273,7 @@ export const DefectPanel = forwardRef<
                   </select>
                 </label>
                 <label>
-                  <span className="field-label">
-                    등급 <span className="kbd">1 2 3</span>
-                  </span>
+                  등급
                   <select value={draft.grade} onChange={(e) => setDraft({ ...draft, grade: e.target.value })} disabled={!grades.length}>
                     <option value="">—</option>
                     {grades.map((g) => (
@@ -282,7 +293,7 @@ export const DefectPanel = forwardRef<
               </select>
             </label>
             <label>
-              {hasRoi ? '거리(m) * · 자동 인식' : '거리(m) *'}
+              거리(m) *
               <input
                 type="number"
                 step="any"
@@ -300,22 +311,6 @@ export const DefectPanel = forwardRef<
               />
             </label>
           </div>
-          {draft.kind === 'condition' && (
-            <div className="condition-grid" role="radiogroup" aria-label="상태 항목">
-              {category?.condition_items.map((c) => (
-                <button
-                  type="button"
-                  key={c.item}
-                  role="radio"
-                  aria-checked={draft.condition_item === c.item}
-                  onClick={() => setDraft({ ...draft, condition_item: c.item })}
-                >
-                  {c.item}
-                  {c.code && <span className="code">{c.code}</span>}
-                </button>
-              ))}
-            </div>
-          )}
           <div className="memo-row">
             <input
               placeholder="메모"

@@ -9,7 +9,9 @@ describe('format', () => {
     expect(formatDateTime(null)).toBe('-')
   })
 
-  it('formats video timestamps to the millisecond', () => {
-    expect(formatTimestamp(252_480)).toBe('00:04:12.480')
+  it('formats video timestamps to a tenth of a second, with hours only when needed', () => {
+    expect(formatTimestamp(252_480)).toBe('04:12.4')
+    expect(formatTimestamp(252_480, true)).toBe('00:04:12.4')
+    expect(formatTimestamp(3_723_400)).toBe('01:02:03.4')
   })
 })

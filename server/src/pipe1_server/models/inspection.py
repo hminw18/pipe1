@@ -226,9 +226,6 @@ class ReportVideo(UuidPrimaryKey, Timestamps, Base):
     depth_roi_y: Mapped[int | None]
     depth_roi_w: Mapped[int | None]
     depth_roi_h: Mapped[int | None]
-    # Timeline strip: one tile every thumbnail_interval_seconds, laid out left to right.
-    thumbnail_object_key: Mapped[str | None] = mapped_column(Text)
-    thumbnail_interval_seconds: Mapped[float | None] = mapped_column(Float)
     processing_error: Mapped[str | None] = mapped_column(Text)
 
 

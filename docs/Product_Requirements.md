@@ -459,7 +459,7 @@ Controls:
 - Frame-by-frame step
 - +/-5 second jump
 - Speed selection: 0.5x, 1x, 2x
-- Current time display (`HH:MM:SS.ms`)
+- Current time display (`MM:SS.s`, tenths of a second; `HH:MM:SS.s` for videos of an hour or more)
 - Total duration display
 
 Rules:

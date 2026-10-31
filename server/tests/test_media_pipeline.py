@@ -83,7 +83,6 @@ def test_upload_process_and_play(client: TestClient, report: dict, tmp_path: Pat
     assert (video["width"], video["height"]) == (320, 240)
     playback = client.get(_path_and_query(video["playback_url"]))
     assert playback.status_code == 200 and playback.content[4:8] == b"ftyp"
-    assert client.get(_path_and_query(video["thumbnail_url"])).status_code == 200
 
 
 def test_capture_is_frame_accurate(client: TestClient, report: dict, tmp_path: Path) -> None:
@@ -335,7 +334,6 @@ def test_browser_playable_video_is_repackaged_not_reencoded(
     assert video["transcode_status"] == "ready", video
     playback = client.get(_path_and_query(video["playback_url"])).content
     assert 0 < playback.find(b"moov") < playback.find(b"mdat")  # index first: seekable
-    assert client.get(_path_and_query(video["thumbnail_url"])).status_code == 200
 
 
 def _png(width: int = 320, height: int = 240, value: int = 77) -> bytes:

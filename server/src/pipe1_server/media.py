@@ -25,8 +25,6 @@ URL_PROTOCOLS = "https,tls,tcp,crypto,file,pipe"
 PROBE_TIMEOUT_SECONDS = 120
 TRANSCODE_TIMEOUT_SECONDS = 4 * 3600
 FRAME_TIMEOUT_SECONDS = 60
-THUMBNAIL_WIDTH = 160
-MAX_THUMBNAIL_TILES = 200
 # Frames captured in the browser (8K is the largest recorder output we expect).
 MAX_FRAME_BYTES = 48 * 1024 * 1024
 MAX_FRAME_SIDE = 8192
@@ -186,7 +184,7 @@ def transcode_for_browser(source: str, destination: Path) -> None:
             "23",
             "-pix_fmt",
             "yuv420p",
-            # A keyframe every 2 s: quick seeking in the browser and keyframe-only thumbnails.
+            # A keyframe every 2 s: quick seeking in the browser and in stop analysis.
             "-force_key_frames",
             "expr:gte(t,n_forced*2)",
             "-movflags",
@@ -195,45 +193,6 @@ def transcode_for_browser(source: str, destination: Path) -> None:
         ],
         TRANSCODE_TIMEOUT_SECONDS,
     )
-
-
-def thumbnail_interval(duration_seconds: float) -> float:
-    return max(1.0, math.ceil(duration_seconds / MAX_THUMBNAIL_TILES))
-
-
-def thumbnail_strip(source: str, destination: Path, duration_seconds: float) -> float:
-    """One JPEG with a tile every interval seconds, left to right. Returns the interval.
-
-    First only keyframes are decoded, so a long video is not decoded a second time; each tile
-    shows the nearest earlier keyframe, close enough for a timeline preview. Videos with too
-    few keyframes to fill the strip get a full decode instead."""
-    interval = thumbnail_interval(duration_seconds)
-    tiles = max(1, min(MAX_THUMBNAIL_TILES, math.ceil(duration_seconds / interval)))
-    for keyframes_only in (True, False):
-        destination.unlink(missing_ok=True)
-        _run(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-v",
-                "error",
-                "-y",
-                *(["-skip_frame", "nokey"] if keyframes_only else []),
-                *_input_args(source),
-                "-vf",
-                f"fps=1/{interval},scale={THUMBNAIL_WIDTH}:-2,tile={tiles}x1",
-                "-frames:v",
-                "1",
-                "-q:v",
-                "5",
-                str(destination),
-            ],
-            TRANSCODE_TIMEOUT_SECONDS,
-        )
-        # ffmpeg writes nothing (and still succeeds) when the strip cannot be filled.
-        if destination.exists() and destination.stat().st_size > 0:
-            return interval
-    raise MediaError("could not build the thumbnail strip")
 
 
 def extract_frame_png(source: str, timestamp_ms: int) -> bytes:

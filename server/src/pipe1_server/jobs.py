@@ -361,24 +361,15 @@ class JobRunner:
                 raise UserFacingError(INVALID_VIDEO) from error
             playback = directory / "playback.mp4"
             self._prepare_playback(source, playback, probe, progress)
-            progress(80, "타임라인 미리보기 생성")
-            thumbnails = directory / "thumbnails.jpg"
-            # The local playback copy, not the source: it may be a remote signed URL.
-            interval = media.thumbnail_strip(str(playback), thumbnails, probe.duration_seconds)
-            folder = f"{group_prefix}video/{uuid.uuid4()}/"
-            playback_key, thumbnail_key = f"{folder}playback.mp4", f"{folder}thumbnails.jpg"
+            playback_key = f"{group_prefix}video/{uuid.uuid4()}/playback.mp4"
             self._store.upload_from(playback, playback_key, "video/mp4")
-            self._store.upload_from(thumbnails, thumbnail_key, "image/jpeg")
         with self.session(user) as db:
             video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
             if video is None or video.original_object_key != original_key:
                 # Replaced while processing; discard this output.
                 self._store.delete(playback_key)
-                self._store.delete(thumbnail_key)
                 raise UserFacingError("처리 중 영상이 교체되었습니다.")
             video.playback_object_key = playback_key
-            video.thumbnail_object_key = thumbnail_key
-            video.thumbnail_interval_seconds = interval
             video.duration_seconds = probe.duration_seconds
             video.fps = probe.fps
             video.width, video.height = probe.width, probe.height

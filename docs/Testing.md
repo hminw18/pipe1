@@ -122,7 +122,7 @@ Uses real ffmpeg on small generated videos.
 
 | Test | Guarantees |
 |---|---|
-| `test_upload_process_and_play` | Upload → processing → playable MP4 and thumbnail strip (re-encode path, MJPEG source). |
+| `test_upload_process_and_play` | Upload → processing → playable MP4 (re-encode path, MJPEG source). |
 | `test_browser_playable_video_is_repackaged_not_reencoded` | H.264 sources are only repackaged (no re-encode) and come out seekable (index first). |
 | `test_capture_is_frame_accurate` | Server-side capture returns the frame at the requested time. |
 | `test_two_captures_at_same_time_have_separate_images` | Deleting one defect never deletes another's image. |
@@ -235,7 +235,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 | `client.test.ts` (4) | The CSRF token is sent only on state-changing requests; a 401 outside login ends the session; structured error codes are exposed; tokens are read from the URL fragment. |
 | `timing.test.ts` (7) | Session warnings 2 minutes before the idle and absolute timeouts, expiry, and heartbeat only while the user is active and not too often. |
 | `geometry.test.ts` (4) | Depth-region rectangles map correctly between the scaled, letterboxed player and video pixels, in both directions, including right-to-left drags and clamping. |
-| `format.test.ts` (2) | Dates in Korea time; video timestamps to the millisecond. |
+| `format.test.ts` (2) | Dates in Korea time; video timestamps to a tenth of a second, with hours only for an hour or more. |
 
 ---
 

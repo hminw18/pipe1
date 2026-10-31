@@ -2060,10 +2060,6 @@ export interface components {
             scan_direction: string;
             /** Size Bytes */
             size_bytes: number | null;
-            /** Thumbnail Interval Seconds */
-            thumbnail_interval_seconds: number | null;
-            /** Thumbnail Url */
-            thumbnail_url: string | null;
             /** Transcode Status */
             transcode_status: string;
             /** Width */
