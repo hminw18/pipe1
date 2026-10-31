@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import cv2
@@ -73,6 +74,8 @@ def test_stop_frame_candidates_are_found_after_motion_bursts(tmp_path: Path) -> 
     assert len(candidates) >= 2
     assert any(2.0 <= timestamp <= 3.8 for timestamp in timestamps)
     assert any(4.8 <= timestamp <= 6.8 for timestamp in timestamps)
+    # The web app stores the result as JSON; internal image signatures must not leak into it.
+    json.dumps(segments)
 
 
 def test_stop_frame_candidates_respect_max_per_segment(tmp_path: Path) -> None:

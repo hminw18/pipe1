@@ -33,10 +33,11 @@ export function useVideo(reportId: string) {
   })
 }
 
-export function useStopAnalysis(reportId: string) {
+/** Recent jobs of one kind, newest first; polls while the newest is unfinished. */
+export function useJobs(reportId: string, kind: 'stop_analysis' | 'defect_detection') {
   return useQuery({
-    queryKey: keys.jobs(reportId, 'stop_analysis'),
-    queryFn: () => get<Schemas['JobOut'][]>(`/api/reports/${reportId}/jobs?kind=stop_analysis`),
+    queryKey: keys.jobs(reportId, kind),
+    queryFn: () => get<Schemas['JobOut'][]>(`/api/reports/${reportId}/jobs?kind=${kind}`),
     refetchInterval: (query) => {
       const latest = query.state.data?.[0]
       return latest && (latest.status === 'queued' || latest.status === 'running') ? 2000 : false
@@ -48,5 +49,12 @@ export function useDefects(reportId: string) {
   return useQuery({
     queryKey: keys.defects(reportId),
     queryFn: () => get<Schemas['DefectOut'][]>(`/api/reports/${reportId}/defects`),
+  })
+}
+
+export function useSuggestions(reportId: string) {
+  return useQuery({
+    queryKey: keys.suggestions(reportId),
+    queryFn: () => get<Schemas['SuggestionList']>(`/api/reports/${reportId}/suggestions`),
   })
 }

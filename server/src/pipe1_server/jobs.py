@@ -25,12 +25,14 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.db import set_access_context
+from pipe1_server.detection import DefectDetector, suggestion_rows, wait_for_result
 from pipe1_server.models.auth import Organization, User
 from pipe1_server.models.inspection import (
+    DefectSuggestion,
     InspectionProject,
     MediaJob,
     Report,
@@ -50,6 +52,8 @@ WORKER_SOURCE_TTL = timedelta(hours=6)
 PROGRESS_WRITE_INTERVAL = 1.0
 GENERIC_FAILURE = "처리 중 오류가 발생했습니다. 다시 시도하거나 관리자에게 문의하세요."
 INVALID_VIDEO = "지원하지 않거나 손상된 영상입니다. avi, mkv, mov, mp4 영상을 올려 주세요."
+DETECTION_OFF = "AI 분석이 설정되지 않았습니다."
+DETECTOR_FAILED = "AI 분석 서버에서 오류가 발생했습니다. 잠시 후 다시 시도하세요."
 
 
 class UserFacingError(RuntimeError):
@@ -254,9 +258,15 @@ def _active_user(session_factory: sessionmaker[Session], user_id: uuid.UUID) -> 
 
 
 class JobRunner:
-    def __init__(self, session_factory: sessionmaker[Session], store: ObjectStore) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        store: ObjectStore,
+        detector: DefectDetector | None = None,
+    ) -> None:
         self._sessions = session_factory
         self._store = store
+        self._detector = detector
 
     @contextmanager
     def session(self, user: User) -> Iterator[Session]:
@@ -284,6 +294,13 @@ class JobRunner:
         handler: Callable[..., dict[str, Any]] = getattr(self, f"_run_{kind}")
         try:
             result = handler(user, job_id, report_id, parameters)
+            # Inside the try: a result that cannot be stored must fail the job, not leave it
+            # running forever.
+            with self.session(user) as db:
+                job = db.get(MediaJob, job_id)
+                if job is not None:
+                    job.status, job.progress, job.result = "succeeded", 100, result
+                    job.message = None
         except Exception as error:  # noqa: BLE001 - every failure is recorded on the job
             logger.exception("job %s (%s) failed", job_id, kind)
             message = str(error) if isinstance(error, UserFacingError) else GENERIC_FAILURE
@@ -291,12 +308,6 @@ class JobRunner:
                 job = db.get(MediaJob, job_id)
                 if job is not None:
                     job.status, job.error = "failed", message
-            return
-        with self.session(user) as db:
-            job = db.get(MediaJob, job_id)
-            if job is not None:
-                job.status, job.progress, job.result = "succeeded", 100, result
-                job.message = None
 
     def _progress(self, user: User, job_id: uuid.UUID) -> Callable[[int, str], None]:
         last = [0.0]
@@ -421,6 +432,64 @@ class JobRunner:
                 self._store.download_to(playback_key, path)
             result = run_stop_analysis(str(path), roi, progress=progress)
         return {"segments": result.segments, "benchmark": result.benchmark}
+
+    # -- defect_detection ----------------------------------------------------------------
+
+    def _run_defect_detection(self, user, job_id, report_id, parameters) -> dict[str, Any]:
+        if self._detector is None:
+            raise UserFacingError(DETECTION_OFF)
+        with self.session(user) as db:
+            video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
+            if video is None or video.transcode_status != "ready":
+                raise UserFacingError("영상 처리가 끝난 뒤 분석할 수 있습니다.")
+            playback_key, duration = video.playback_object_key, video.duration_seconds
+        progress = self._progress(user, job_id)
+        remote_id = parameters.get("detector_job_id")
+        submitted_at = parameters.get("detector_submitted_at")
+        try:
+            if remote_id is None or submitted_at is None:
+                progress(1, "AI 분석 요청")
+                # The GPU server fetches the playback copy itself: the frames and times the
+                # player uses.
+                url = self._store.signed_download_url(playback_key, WORKER_SOURCE_TTL)
+                remote_id, submitted_at = self._detector.submit(url), time.time()
+                # Saved so that a restart or a Cloud Tasks retry polls this GPU job instead of
+                # starting another one.
+                with self.session(user) as db:
+                    job = db.get(MediaJob, job_id)
+                    if job is not None:
+                        job.parameters = {
+                            **job.parameters,
+                            "detector_job_id": remote_id,
+                            "detector_submitted_at": submitted_at,
+                        }
+            result = wait_for_result(self._detector, remote_id, float(submitted_at), progress)
+        except Exception as error:  # noqa: BLE001 - any detector failure is the same to users
+            raise UserFacingError(DETECTOR_FAILED) from error
+        rows, skipped = suggestion_rows(result, duration)
+        with self.session(user) as db:
+            video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
+            if video is None or video.playback_object_key != playback_key:
+                raise UserFacingError("분석 중 영상이 교체되었습니다.")
+            # A new run replaces the previous suggestions; recorded defects stay.
+            db.execute(delete(DefectSuggestion).where(DefectSuggestion.report_id == report_id))
+            for row in rows:
+                db.add(
+                    DefectSuggestion(
+                        project_id=video.project_id,
+                        report_id=report_id,
+                        video_id=video.id,
+                        model_version=result.model_version,
+                        **row,
+                    )
+                )
+        if skipped:
+            logger.warning("job %s: tracks with unknown codes dropped: %s", job_id, skipped)
+        return {
+            "model_version": result.model_version,
+            "suggestions": len(rows),
+            "skipped_codes": skipped,
+        }
 
     # -- exports -------------------------------------------------------------------------
 

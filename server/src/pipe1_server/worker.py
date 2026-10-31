@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.db import get_session_factory
+from pipe1_server.detection import build_detector
 from pipe1_server.email.delivery import (
     EmailMessage,
     EmailSender,
@@ -86,7 +87,7 @@ def get_runner(
     session_factory: Annotated[sessionmaker[Session], Depends(get_session_factory)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> JobRunner:
-    return JobRunner(session_factory, build_store(settings))
+    return JobRunner(session_factory, build_store(settings), build_detector(settings))
 
 
 class JobTask(BaseModel):

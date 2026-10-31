@@ -17,6 +17,7 @@ from pipe1_server.ids import uuid7
 from pipe1_server.models.inspection import (
     ActualSurveyInformation,
     Business,
+    DefectSuggestion,
     InspectionProject,
     Manhole,
     PipeInformation,
@@ -82,6 +83,19 @@ DEFECT_COPY_FIELDS = (
     "manhole_defect_depth_m",
     "memo",
     "created_by",
+)
+SUGGESTION_COPY_FIELDS = (
+    "model_version",
+    "code",
+    "item_category",
+    "defect_item",
+    "confidence",
+    "start_ms",
+    "end_ms",
+    "best_ms",
+    "best_box",
+    "boxes",
+    "status",
 )
 ROLES = ("upstream", "downstream")
 COPY_SUFFIX = " 복사본"
@@ -228,8 +242,10 @@ def create_version_from_latest(
     )
     db.add(new_video)
     db.flush()
+    new_defect_ids: dict[uuid.UUID, uuid.UUID] = {}
     for defect in db.scalars(select(ReportDefect).where(ReportDefect.report_id == latest.id)):
         defect_id = uuid7()
+        new_defect_ids[defect.id] = defect_id
         key = capture_key(project, report.id, defect_id)
         store.copy(defect.image_object_key, key)
         db.add(
@@ -240,6 +256,20 @@ def create_version_from_latest(
                 video_id=new_video.id,
                 image_object_key=key,
                 **{field: getattr(defect, field) for field in DEFECT_COPY_FIELDS},
+            )
+        )
+    db.flush()
+    for suggestion in db.scalars(
+        select(DefectSuggestion).where(DefectSuggestion.report_id == latest.id)
+    ):
+        confirmed = suggestion.defect_id and new_defect_ids.get(suggestion.defect_id)
+        db.add(
+            DefectSuggestion(
+                project_id=report.project_id,
+                report_id=report.id,
+                video_id=new_video.id,
+                defect_id=confirmed,
+                **{field: getattr(suggestion, field) for field in SUGGESTION_COPY_FIELDS},
             )
         )
     db.flush()

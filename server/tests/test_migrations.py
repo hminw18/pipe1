@@ -33,6 +33,7 @@ def test_row_level_security_enabled_on_all_project_tables(owner_engine: Engine) 
         "report_defects",
         "video_uploads",
         "media_jobs",
+        "defect_suggestions",
     }
 
 

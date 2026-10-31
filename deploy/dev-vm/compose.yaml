@@ -65,9 +65,14 @@ services:
       PIPE1_BREACHED_PASSWORD_SOURCE: hibp
       # Caddy appends the client address to X-Forwarded-For.
       PIPE1_TRUSTED_PROXY_HOPS: "1"
+      # AI defect detection: set PIPE1_DEFECT_DETECTOR_URL (and _TOKEN) in .env once the GPU
+      # server is up. Until then a sample result stands in, so the screens can be tried.
+      PIPE1_DEFECT_DETECTOR_URL: ${PIPE1_DEFECT_DETECTOR_URL:-}
+      PIPE1_DEFECT_DETECTOR_SAMPLE_FILE: /app/detection-sample.json
     command: ["uvicorn", "pipe1_server.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header"]
     volumes:
       - storage:/data/storage
+      - ./detection-sample.json:/app/detection-sample.json:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

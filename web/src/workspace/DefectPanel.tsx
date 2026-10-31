@@ -5,7 +5,8 @@ import { ApiError, del, get, patch, post, type Schemas } from '../api/client'
 import { keys, useTaxonomy } from '../api/queries'
 import { formatTimestamp } from '../format'
 import { errorText } from '../errors'
-import { useDefects, type PlayerApi } from './hooks'
+import { useDefects, useSuggestions, type PlayerApi } from './hooks'
+import { isOpen, type Suggestion } from './suggestions'
 
 type Defect = Schemas['DefectOut']
 type Draft = {
@@ -21,6 +22,7 @@ type Draft = {
   manhole_defect_depth_m: string
   memo: string
   frame: string | null // base64 PNG grabbed from the local file; null: server extracts it
+  suggestion: Suggestion | null // the AI suggestion this defect confirms
 }
 
 export type DefectPanelApi = {
@@ -43,6 +45,7 @@ const EMPTY: Draft = {
   manhole_defect_depth_m: '',
   memo: '',
   frame: null,
+  suggestion: null,
 }
 
 function numberOrNull(value: string): number | null {
@@ -55,6 +58,7 @@ export const DefectPanel = forwardRef<
 >(function DefectPanel({ reportId, canEdit, hasRoi, player }, ref) {
   const taxonomy = useTaxonomy()
   const defects = useDefects(reportId)
+  const suggestions = useSuggestions(reportId)
   const queryClient = useQueryClient()
   const summary = useQuery({
     queryKey: keys.gradeSummary(reportId),
@@ -65,6 +69,7 @@ export const DefectPanel = forwardRef<
   const [selected, setSelected] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showRejected, setShowRejected] = useState(false)
 
   const category = taxonomy.data?.categories.find((c) => c.category === draft.item_category)
   const definition = category?.defect_items.find((d) => d.item === draft.defect_item)
@@ -74,6 +79,7 @@ export const DefectPanel = forwardRef<
     await queryClient.invalidateQueries({ queryKey: keys.defects(reportId) })
     await queryClient.invalidateQueries({ queryKey: keys.gradeSummary(reportId) })
     await queryClient.invalidateQueries({ queryKey: keys.report(reportId) })
+    await queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
   }
 
   async function capture() {
@@ -101,9 +107,13 @@ export const DefectPanel = forwardRef<
     }
   }
 
+  function validGrades(itemCategory: string, item: string): string[] {
+    const def = taxonomy.data?.categories.find((c) => c.category === itemCategory)?.defect_items.find((d) => d.item === item)
+    return def ? (taxonomy.data?.grades ?? []).filter((g) => g in def.scores) : []
+  }
+
   function setDefectItem(item: string) {
-    const def = category?.defect_items.find((d) => d.item === item)
-    const valid = def ? (taxonomy.data?.grades ?? []).filter((g) => g in def.scores) : []
+    const valid = validGrades(draft.item_category, item)
     // A defect with exactly one valid grade gets it automatically (Product_Requirements §4.8).
     setDraft({ ...draft, defect_item: item, grade: valid.length === 1 ? valid[0] : valid.includes(draft.grade) ? draft.grade : '' })
   }
@@ -132,6 +142,7 @@ export const DefectPanel = forwardRef<
           ...fields,
           timestamp_ms: draft.timestamp_ms,
           frame_png_base64: draft.frame,
+          suggestion_id: draft.suggestion?.id ?? null,
         })
       }
       setDraft({ ...EMPTY, drive_direction: draft.drive_direction, item_category: draft.item_category })
@@ -153,6 +164,34 @@ export const DefectPanel = forwardRef<
     await del(`/api/defects/${id}`)
     if (selected === id) setSelected(null)
     await refresh()
+  }
+
+  /** Fill the form from an AI suggestion and show its best frame; the inspector captures (C),
+   *  corrects anything wrong and saves, which confirms the suggestion. */
+  function apply(suggestion: Suggestion) {
+    const valid = validGrades(suggestion.item_category, suggestion.defect_item)
+    setEditing(null)
+    setError(null)
+    setDraft((current) => ({
+      ...EMPTY,
+      drive_direction: current.drive_direction,
+      item_category: suggestion.item_category,
+      defect_item: suggestion.defect_item,
+      grade: valid.length === 1 ? valid[0] : '',
+      suggestion,
+    }))
+    player.current?.pause()
+    player.current?.seekMs(suggestion.best_ms)
+  }
+
+  async function setSuggestionStatus(suggestion: Suggestion, status: 'pending' | 'rejected') {
+    try {
+      await patch(`/api/suggestions/${suggestion.id}`, { status })
+      if (draft.suggestion?.id === suggestion.id) setDraft({ ...draft, suggestion: null })
+      await queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
+    } catch (failure) {
+      setError(errorText(failure))
+    }
   }
 
   useImperativeHandle(ref, () => ({
@@ -182,6 +221,7 @@ export const DefectPanel = forwardRef<
       manhole_defect_depth_m: defect.manhole_defect_depth_m == null ? '' : String(defect.manhole_defect_depth_m),
       memo: defect.memo ?? '',
       frame: null,
+      suggestion: null,
     })
     player.current?.seekMs(defect.timestamp_ms)
   }
@@ -320,7 +360,12 @@ export const DefectPanel = forwardRef<
               aria-label="메모"
             />
             {editing && <span className="editing-tag">수정 중</span>}
-            {editing && (
+            {draft.suggestion && (
+              <span className="editing-tag">
+                AI 제안 {draft.suggestion.code} {draft.suggestion.defect_item} · C로 캡처 후 저장
+              </span>
+            )}
+            {(editing || draft.suggestion) && (
               <button
                 type="button"
                 onClick={() => {
@@ -339,6 +384,18 @@ export const DefectPanel = forwardRef<
           {error && <p className="error">{error}</p>}
         </form>
       )}
+
+      <SuggestionTable
+        suggestions={suggestions.data?.suggestions ?? []}
+        defects={defects.data ?? []}
+        canEdit={canEdit}
+        applied={draft.suggestion?.id ?? null}
+        showRejected={showRejected}
+        onToggleRejected={() => setShowRejected(!showRejected)}
+        onSeek={(ms) => player.current?.seekMs(ms)}
+        onApply={apply}
+        onStatus={(suggestion, status) => void setSuggestionStatus(suggestion, status)}
+      />
 
       <div className="tbl-wrap">
         <table className="defect-list">
@@ -428,3 +485,115 @@ export const DefectPanel = forwardRef<
     </section>
   )
 })
+
+function SuggestionTable({
+  suggestions,
+  defects,
+  canEdit,
+  applied,
+  showRejected,
+  onToggleRejected,
+  onSeek,
+  onApply,
+  onStatus,
+}: {
+  suggestions: Suggestion[]
+  defects: Defect[]
+  canEdit: boolean
+  applied: string | null
+  showRejected: boolean
+  onToggleRejected: () => void
+  onSeek: (ms: number) => void
+  onApply: (suggestion: Suggestion) => void
+  onStatus: (suggestion: Suggestion, status: 'pending' | 'rejected') => void
+}) {
+  const open = suggestions.filter((s) => isOpen(s, defects))
+  const rejected = suggestions.filter((s) => s.status === 'rejected')
+  if (!open.length && !rejected.length) return null
+  const rows = showRejected ? [...open, ...rejected].sort((a, b) => a.start_ms - b.start_ms) : open
+  return (
+    <div className="suggestions">
+      <div className="suggestions-head">
+        <h3>
+          AI 제안 <span className="mono">{open.length}</span>
+        </h3>
+        <span className="faint">모델 {suggestions[0].model_version} · 검토 후 등록한 것만 보고서에 들어갑니다</span>
+        <span className="spacer" />
+        {rejected.length > 0 && (
+          <button className="link quiet" onClick={onToggleRejected}>
+            무시한 제안 {rejected.length} {showRejected ? '숨기기' : '보기'}
+          </button>
+        )}
+      </div>
+      <div className="tbl-wrap">
+        <table className="defect-list">
+          <thead>
+            <tr>
+              <th>구간</th>
+              <th>분류</th>
+              <th className="left">결함</th>
+              <th>신뢰도</th>
+              <th className="actions-col" aria-label="작업" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr
+                key={s.id}
+                className={s.id === applied ? 'selected' : s.status === 'rejected' ? 'rejected' : undefined}
+                onClick={() => onSeek(s.best_ms)}
+              >
+                <td className="num">
+                  {formatTimestamp(s.start_ms)} – {formatTimestamp(s.end_ms)}
+                </td>
+                <td>{s.item_category}</td>
+                <td className="left">
+                  {s.defect_item} <span className="code">{s.code}</span>
+                </td>
+                <td className="num">{Math.round(s.confidence * 100)}%</td>
+                <td>
+                  {canEdit && (
+                    <div className="row-actions center">
+                      {s.status === 'rejected' ? (
+                        <button
+                          className="link"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onStatus(s, 'pending')
+                          }}
+                        >
+                          복원
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="link"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onApply(s)
+                            }}
+                          >
+                            적용
+                          </button>
+                          <button
+                            className="link quiet"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onStatus(s, 'rejected')
+                            }}
+                          >
+                            무시
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}

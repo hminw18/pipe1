@@ -13,6 +13,7 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session, sessionmaker
 
 from pipe1_server.db import get_db, get_session_factory, set_access_context
+from pipe1_server.detection import build_detector
 from pipe1_server.email.delivery import EmailQueue, build_queue
 from pipe1_server.jobs import (
     BackgroundJobQueue,
@@ -222,13 +223,16 @@ def get_job_queue(settings: AppSettings, session_factory: SessionFactory, store:
         )
     if settings.job_queue == "background":
         return background_job_queue()
-    return InlineJobQueue(JobRunner(session_factory, store))
+    return InlineJobQueue(JobRunner(session_factory, store, build_detector(settings)))
 
 
 @lru_cache
 def background_job_queue() -> BackgroundJobQueue:
     """One per process, so its threads and queue outlive the request that enqueued a job."""
-    return BackgroundJobQueue(JobRunner(get_session_factory(), build_store(get_settings())))
+    settings = get_settings()
+    return BackgroundJobQueue(
+        JobRunner(get_session_factory(), build_store(settings), build_detector(settings))
+    )
 
 
 @lru_cache

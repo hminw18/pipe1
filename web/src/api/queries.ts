@@ -13,6 +13,7 @@ export const keys = {
   defects: (reportId: string) => ['defects', reportId] as const,
   gradeSummary: (reportId: string) => ['grade-summary', reportId] as const,
   jobs: (reportId: string, kind: string) => ['jobs', reportId, kind] as const,
+  suggestions: (reportId: string) => ['suggestions', reportId] as const,
   taxonomy: ['taxonomy'] as const,
 }
 

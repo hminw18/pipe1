@@ -1,6 +1,6 @@
 # Tests
 
-What each automated test protects, and why it exists. 207 Python test functions (143 server, 64 desktop/core) and 17 frontend tests.
+What each automated test protects, and why it exists. 212 Python test functions (148 server, 64 desktop/core) and 19 frontend tests.
 
 ## Running them
 
@@ -141,6 +141,18 @@ Uses real ffmpeg on small generated videos.
 | `test_unusable_browser_frames_are_rejected` | Non-PNG, truncated, or huge-dimension frames are refused before decoding. |
 | `test_interrupted_jobs_are_resumed_at_startup` | On the dev VM, jobs cut off by a restart run again. |
 
+### AI defect suggestions: `test_defect_suggestions.py`
+
+A sample result file stands in for the GPU server.
+
+| Test | Guarantees |
+|---|---|
+| `test_detection_is_off_without_a_detector` | Without a configured detector the feature is hidden and cannot be started. |
+| `test_tracks_become_suggestions_that_defects_confirm` | Tracks map to Pipe1 defect items (pipe and manhole codes; unknown codes dropped), times are clamped to the video, the best box falls back to the nearest sample; rejecting works, recording a defect confirms (even with a corrected item), a confirmed suggestion cannot be rejected, new versions carry suggestions linked to their own defects, deleting the defect reopens it, a new run replaces suggestions and a new video removes them. |
+| `test_suggestion_from_another_report_is_refused` | A defect cannot confirm another report's suggestion. |
+| `test_invalid_detector_output_fails_the_job` | Out-of-range detector output fails the job with a clear message and stores nothing. |
+| `test_http_detector_follows_the_contract` | The client sends the GPU server the contract's request and token, rides out a short outage while polling, fails on an error status, and keeps the 3-hour deadline from submission. |
+
 ### Depth counter reading: `test_depth_counter_reader.py`
 
 No database needed. Protects the distances that stop analysis and captures fill in.
@@ -202,7 +214,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 
 | File | Guarantees |
 |---|---|
-| `test_frame_candidate_detector.py` (2) | Candidate frames are found after motion bursts, at most the configured number per stop. |
+| `test_frame_candidate_detector.py` (2) | Candidate frames are found after motion bursts, at most the configured number per stop, and the result is plain JSON (an internal image signature once leaked into it, so the web app could not store the job result and the job hung at 99%). |
 | `test_depth_ocr_stop_detector.py` (4) | Digit slots of the depth counter are located (also with loose ROIs); depth series become stop segments with short gaps bridged; reading keyframes first finds exactly the stops that decoding every frame finds (including a short stop spanning a keyframe and an unreadable stretch), with far fewer frames decoded. |
 | `test_depth.py` (3) | Distance OCR is positive on a real report video, falls back to Tesseract, returns nothing when both fail. |
 | `test_video_capture.py` (1) | Opening a video falls back to the default backend when ffmpeg fails. |
@@ -236,6 +248,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 | `timing.test.ts` (7) | Session warnings 2 minutes before the idle and absolute timeouts, expiry, and heartbeat only while the user is active and not too often. |
 | `geometry.test.ts` (4) | Depth-region rectangles map correctly between the scaled, letterboxed player and video pixels, in both directions, including right-to-left drags and clamping. |
 | `format.test.ts` (2) | Dates in Korea time; video timestamps to a tenth of a second, with hours only for an hour or more. |
+| `suggestions.test.ts` (2) | An AI suggestion stays open until rejected, confirmed, or the same item is recorded around it; the player draws the nearest box sample and nothing far from every sample. |
 
 ---
 

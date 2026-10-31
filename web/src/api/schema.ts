@@ -890,6 +890,23 @@ export interface paths {
         patch: operations["update_actual_survey_api_reports__report_id__actual_survey_patch"];
         trace?: never;
     };
+    "/api/reports/{report_id}/defect-detection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Defect Detection */
+        post: operations["start_defect_detection_api_reports__report_id__defect_detection_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reports/{report_id}/defects": {
         parameters: {
             query?: never;
@@ -1037,6 +1054,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/reports/{report_id}/suggestions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Suggestions */
+        get: operations["list_suggestions_api_reports__report_id__suggestions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/reports/{report_id}/video": {
         parameters: {
             query?: never;
@@ -1070,6 +1104,23 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/suggestions/{suggestion_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Suggestion */
+        patch: operations["update_suggestion_api_suggestions__suggestion_id__patch"];
         trace?: never;
     };
     "/api/taxonomy": {
@@ -1146,6 +1197,15 @@ export interface components {
             target_id: string | null;
             /** Target Type */
             target_type: string | null;
+        };
+        /** BoxSampleOut */
+        BoxSampleOut: {
+            /** Box */
+            box: number[];
+            /** Score */
+            score: number | null;
+            /** T Ms */
+            t_ms: number;
         };
         /** BusinessCreate */
         BusinessCreate: {
@@ -1269,6 +1329,8 @@ export interface components {
             memo?: string | null;
             /** Quadrant */
             quadrant?: ("없음" | "상" | "상우하" | "우" | "우상" | "우상좌하" | "우하" | "좌" | "좌상" | "좌상우하" | "좌하" | "하" | "하우상" | "하좌상" | "전체") | null;
+            /** Suggestion Id */
+            suggestion_id?: string | null;
             /** Timestamp Ms */
             timestamp_ms: number;
         };
@@ -1899,6 +1961,53 @@ export interface components {
             last_seen_at: string;
             /** User Agent */
             user_agent: string | null;
+        };
+        /** SuggestionList */
+        SuggestionList: {
+            /** Available */
+            available: boolean;
+            /** Suggestions */
+            suggestions: components["schemas"]["SuggestionOut"][];
+        };
+        /** SuggestionOut */
+        SuggestionOut: {
+            /** Best Box */
+            best_box: number[] | null;
+            /** Best Ms */
+            best_ms: number;
+            /** Boxes */
+            boxes: components["schemas"]["BoxSampleOut"][];
+            /** Code */
+            code: string;
+            /** Confidence */
+            confidence: number;
+            /** Defect Id */
+            defect_id: string | null;
+            /** Defect Item */
+            defect_item: string;
+            /** End Ms */
+            end_ms: number;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Item Category */
+            item_category: string;
+            /** Model Version */
+            model_version: string;
+            /** Start Ms */
+            start_ms: number;
+            /** Status */
+            status: string;
+        };
+        /** SuggestionUpdate */
+        SuggestionUpdate: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "rejected";
         };
         /** SurveyUpdate */
         SurveyUpdate: {
@@ -3964,6 +4073,37 @@ export interface operations {
             };
         };
     };
+    start_defect_detection_api_reports__report_id__defect_detection_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_defects_api_reports__report_id__defects_get: {
         parameters: {
             query?: never;
@@ -4266,6 +4406,37 @@ export interface operations {
             };
         };
     };
+    list_suggestions_api_reports__report_id__suggestions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_video_api_reports__report_id__video_get: {
         parameters: {
             query?: never;
@@ -4354,6 +4525,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UploadSession"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_suggestion_api_suggestions__suggestion_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                suggestion_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SuggestionUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionOut"];
                 };
             };
             /** @description Validation Error */

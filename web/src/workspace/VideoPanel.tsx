@@ -15,8 +15,9 @@ import { formatBytes, formatTimestamp } from '../format'
 import { errorText } from '../errors'
 import { useSession } from '../session/context'
 import { elementRectToVideoRect, videoRectToElementRect, type Rect } from './geometry'
-import { useStopAnalysis, useVideo, type PlayerApi } from './hooks'
+import { useJobs, useSuggestions, useVideo, type PlayerApi } from './hooks'
 import { grabFrame, type LocalVideo } from './localVideo'
+import { boxAt, isOpen } from './suggestions'
 
 type Segment = { start_time: number; end_time: number; candidates?: { time?: number; timestamp?: number }[] }
 
@@ -71,6 +72,20 @@ function LocalStatus({ local, info }: { local: LocalVideo; info: Schemas['VideoO
   return null
 }
 
+/** Progress or failure of the newest job of one kind. */
+function JobStatus({ label, job }: { label: string; job: Schemas['JobOut'] | undefined }) {
+  if (job && (job.status === 'queued' || job.status === 'running')) {
+    return (
+      <p className="job-line">
+        {label} <span className="mono">{job.progress}%</span> {job.message ?? ''}
+        <progress max={100} value={job.progress} />
+      </p>
+    )
+  }
+  if (job?.status === 'failed') return <p className="job-line error">{job.error}</p>
+  return null
+}
+
 export const VideoPanel = forwardRef<
   PlayerApi,
   {
@@ -83,7 +98,9 @@ export const VideoPanel = forwardRef<
   }
 >(function VideoPanel({ reportId, canEdit, defects, local, onFile, onTime }, ref) {
   const video = useVideo(reportId)
-  const analysis = useStopAnalysis(reportId)
+  const analysis = useJobs(reportId, 'stop_analysis')
+  const detection = useJobs(reportId, 'defect_detection')
+  const suggestions = useSuggestions(reportId)
   const queryClient = useQueryClient()
   const { markActive } = useSession()
   const element = useRef<HTMLVideoElement>(null)
@@ -98,6 +115,7 @@ export const VideoPanel = forwardRef<
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 })
   const [elementDuration, setElementDuration] = useState(0)
+  const [showBoxes, setShowBoxes] = useState(true)
   const info = video.data
   const ready = info?.transcode_status === 'ready'
   // The local file plays from the moment it is chosen; otherwise the processed copy.
@@ -165,12 +183,21 @@ export const VideoPanel = forwardRef<
 
   const latestJob = analysis.data?.[0]
   const segments: Segment[] = (latestJob?.status === 'succeeded' && (latestJob.result?.segments as Segment[])) || []
+  const detectionJob = detection.data?.[0]
+  const detecting = detectionJob?.status === 'queued' || detectionJob?.status === 'running'
+  const openSuggestions = (suggestions.data?.suggestions ?? []).filter((s) => isOpen(s, defects))
 
-  async function startAnalysis() {
+  // A finished detection run replaced the suggestions.
+  const detectionStatus = detectionJob?.status
+  useEffect(() => {
+    if (detectionStatus === 'succeeded') void queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
+  }, [detectionStatus, queryClient, reportId])
+
+  async function startJob(path: string, kind: 'stop_analysis' | 'defect_detection') {
     setError(null)
     try {
-      await post(`/api/reports/${reportId}/stop-analysis`)
-      await queryClient.invalidateQueries({ queryKey: keys.jobs(reportId, 'stop_analysis') })
+      await post(`/api/reports/${reportId}/${path}`)
+      await queryClient.invalidateQueries({ queryKey: keys.jobs(reportId, kind) })
     } catch (failure) {
       setError(errorText(failure))
     }
@@ -325,6 +352,32 @@ export const VideoPanel = forwardRef<
             onError={() => void onError()}
           />
           {savedRoi && !drawing && <div className="roi saved" ref={(node) => positionBox(node, savedRoi)} />}
+          {showBoxes &&
+            !drawing &&
+            stageSize.width > 0 &&
+            intrinsic.width > 0 &&
+            openSuggestions.map((suggestion) => {
+              const box = boxAt(suggestion, timeMs)
+              if (!box) return null
+              const [x1, y1, x2, y2] = box
+              const rect = videoRectToElementRect(
+                {
+                  x: x1 * intrinsic.width,
+                  y: y1 * intrinsic.height,
+                  w: (x2 - x1) * intrinsic.width,
+                  h: (y2 - y1) * intrinsic.height,
+                },
+                stageSize,
+                intrinsic,
+              )
+              return (
+                <div key={suggestion.id} className="ai-box" ref={(node) => positionBox(node, rect)}>
+                  <span>
+                    {suggestion.code} {suggestion.defect_item} {Math.round(suggestion.confidence * 100)}%
+                  </span>
+                </div>
+              )
+            })}
           {draft && <div className="roi draft" ref={(node) => positionBox(node, normalize(draft))} />}
         </div>
 
@@ -362,6 +415,22 @@ export const VideoPanel = forwardRef<
               )
             }),
           )}
+          {openSuggestions.map((suggestion) => {
+            const label = `AI 제안 ${formatTimestamp(suggestion.best_ms)} ${suggestion.defect_item} ${Math.round(suggestion.confidence * 100)}%`
+            return (
+              <button
+                key={suggestion.id}
+                className="timeline-suggestion"
+                aria-label={label}
+                title={label}
+                ref={(node) => positionSpan(node, suggestion.start_ms, suggestion.end_ms, durationMs)}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  seekMs(suggestion.best_ms)
+                }}
+              />
+            )
+          })}
           {defects.map((defect) => {
             const label = `${formatTimestamp(defect.timestamp_ms)} ${defect.grade ?? ''} ${defect.defect_item ?? defect.condition_item ?? ''}`
             return (
@@ -422,6 +491,12 @@ export const VideoPanel = forwardRef<
               의심구간 <span className="mono">{segments.length}</span> · 후보 <span className="mono">{candidateCount}</span>
             </span>
           )}
+          {openSuggestions.length > 0 && (
+            <label className="counts toggle">
+              <input type="checkbox" checked={showBoxes} onChange={(e) => setShowBoxes(e.target.checked)} />
+              AI 제안 <span className="mono">{openSuggestions.length}</span>
+            </label>
+          )}
           {canEdit && (
             <>
               {drawing ? (
@@ -450,25 +525,29 @@ export const VideoPanel = forwardRef<
                 </button>
               )}
               <button
-                onClick={() => void startAnalysis()}
+                onClick={() => void startJob('stop-analysis', 'stop_analysis')}
                 disabled={!ready || latestJob?.status === 'queued' || latestJob?.status === 'running'}
                 title={ready ? undefined : '업로드와 서버 처리가 끝나면 분석할 수 있습니다'}
               >
                 의심구간 분석
               </button>
+              {suggestions.data?.available && (
+                <button
+                  onClick={() => void startJob('defect-detection', 'defect_detection')}
+                  disabled={!ready || detecting}
+                  title={ready ? 'AI가 영상 전체에서 결함을 찾아 제안합니다' : '업로드와 서버 처리가 끝나면 분석할 수 있습니다'}
+                >
+                  AI 분석
+                </button>
+              )}
               <Uploader label="영상 교체" replacing={Boolean(info)} busy={uploading} onFile={onFile} />
             </>
           )}
         </div>
         {local && <LocalStatus local={local} info={info} />}
         {drawing && <p className="job-line">영상 위에서 거리 숫자가 표시되는 영역을 드래그한 뒤 저장하세요.</p>}
-        {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') && (
-          <p className="job-line">
-            의심구간 분석 <span className="mono">{latestJob.progress}%</span> {latestJob.message ?? ''}
-            <progress max={100} value={latestJob.progress} />
-          </p>
-        )}
-        {latestJob?.status === 'failed' && <p className="job-line error">{latestJob.error}</p>}
+        <JobStatus label="의심구간 분석" job={latestJob} />
+        <JobStatus label="AI 분석" job={detectionJob} />
         {error && <p className="job-line error">{error}</p>}
       </div>
     </section>

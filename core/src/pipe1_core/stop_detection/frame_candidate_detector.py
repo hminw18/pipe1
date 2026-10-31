@@ -288,7 +288,12 @@ class StopFrameCandidateDetector:
         candidates.sort(key=lambda item: item["score"], reverse=True)
         selected = self._select_spaced_candidates(candidates)
         selected.sort(key=lambda item: item["timestamp"])
-        return selected[: self.config.max_candidates_per_segment]
+        # The image signature only serves duplicate detection; results must stay JSON (the web
+        # app stores them on the job).
+        return [
+            {key: value for key, value in candidate.items() if key != "signature"}
+            for candidate in selected[: self.config.max_candidates_per_segment]
+        ]
 
     def _stable_threshold(self, motions: np.ndarray) -> float:
         low = float(np.percentile(motions, self.config.stable_percentile))

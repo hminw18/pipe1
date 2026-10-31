@@ -83,7 +83,7 @@ def job_out(job: MediaJob, store) -> JobOut:
     )
 
 
-def _create_job(db, jobs, *, report: Report, kind: str, user_id, parameters) -> MediaJob:
+def create_job(db, jobs, *, report: Report, kind: str, user_id, parameters) -> MediaJob:
     job = MediaJob(
         project_id=report.project_id,
         report_id=report.id,
@@ -127,7 +127,7 @@ def start_stop_analysis(
     )
     if running is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 의심구간 분석이 진행 중입니다.")
-    job = _create_job(
+    job = create_job(
         db,
         jobs,
         report=report,
@@ -177,7 +177,7 @@ def start_export(
                     {"code": "comparison_mismatch", "fields": differences},
                 )
             parameters["after_report_id"] = str(body.after_report_id)
-    job = _create_job(
+    job = create_job(
         db,
         jobs,
         report=report,
@@ -225,7 +225,7 @@ def start_business_export(
             reports.append(latest)
     if not reports:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "선택된 보고서가 없습니다.")
-    job = _create_job(
+    job = create_job(
         db,
         jobs,
         report=reports[0],

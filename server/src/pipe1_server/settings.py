@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     max_video_bytes: int = 20 * 1024**3
     organization_storage_quota_bytes: int = 2 * 1024**4
 
+    # AI defect detection on the separate GPU server (pipe1_server.detection). Unset: the
+    # feature is off. A sample result file stands in for the server in development.
+    defect_detector_url: str | None = None
+    defect_detector_token: SecretStr | None = None
+    defect_detector_sample_file: str | None = None
+
     # Breached-password corpus (docs/Web_Auth_Spec.md §4): "hibp" or "offline".
     breached_password_source: str = "offline"
     breached_password_file: str | None = None

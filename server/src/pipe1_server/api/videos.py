@@ -10,7 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from pipe1_server.api.deps import (
     AppSettings,
@@ -25,7 +25,7 @@ from pipe1_server.api.deps import (
 from pipe1_server.api.reports import load_report
 from pipe1_server.db import after_commit
 from pipe1_server.media import ACCEPTED_EXTENSIONS
-from pipe1_server.models.inspection import MediaJob, ReportVideo, VideoUpload
+from pipe1_server.models.inspection import DefectSuggestion, MediaJob, ReportVideo, VideoUpload
 from pipe1_server.security import audit
 from pipe1_server.storage import (
     UPLOAD_SESSION_TTL,
@@ -250,6 +250,8 @@ def complete_upload(
     else:
         # Keep the row (defects reference it); swap the media and reset processing.
         replaced_keys = {k for k in (video.original_object_key, video.playback_object_key) if k}
+        # AI suggestions point at times in the old video.
+        db.execute(delete(DefectSuggestion).where(DefectSuggestion.report_id == report.id))
         video.original_object_key = upload.object_key
         video.original_filename = upload.original_filename
         video.playback_object_key = None

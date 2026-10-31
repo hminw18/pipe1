@@ -269,6 +269,49 @@ class ReportDefect(UuidPrimaryKey, Timestamps, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
+class DefectSuggestion(UuidPrimaryKey, CreatedAt, Base):
+    """A defect track found by the AI detector (pipe1_server.detection). An inspector confirms
+    it by recording a defect from it, or rejects it; it never becomes a defect by itself."""
+
+    __tablename__ = "defect_suggestions"
+    __table_args__ = (
+        _belongs_to("reports", "report_id"),
+        ForeignKeyConstraint(
+            ["video_id", "report_id"],
+            ["report_videos.id", "report_videos.report_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("status IN ('pending', 'confirmed', 'rejected')", name="status"),
+        CheckConstraint(f"item_category IN {ITEM_CATEGORIES}", name="item_category"),
+        CheckConstraint("confidence BETWEEN 0 AND 1", name="confidence_range"),
+        CheckConstraint(
+            "0 <= start_ms AND start_ms <= best_ms AND best_ms <= end_ms", name="time_order"
+        ),
+        Index("ix_defect_suggestions_report_time", "report_id", "start_ms"),
+    )
+
+    project_id: Mapped[uuid.UUID]
+    report_id: Mapped[uuid.UUID]
+    video_id: Mapped[uuid.UUID]
+    model_version: Mapped[str] = mapped_column(Text)
+    code: Mapped[str] = mapped_column(String(16))
+    item_category: Mapped[str] = mapped_column(String(16))
+    defect_item: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float)
+    start_ms: Mapped[int] = mapped_column(BigInteger)
+    end_ms: Mapped[int] = mapped_column(BigInteger)
+    best_ms: Mapped[int] = mapped_column(BigInteger)
+    # [x1, y1, x2, y2] normalized to the frame; absent when the model reports time spans only.
+    best_box: Mapped[list[float] | None] = mapped_column(JSONB)
+    # [{"t_ms": int, "box": [x1, y1, x2, y2], "score": float | None}, ...] in time order.
+    boxes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    status: Mapped[str] = mapped_column(String(16), server_default="pending")
+    # The defect recorded from this suggestion.
+    defect_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("report_defects.id", ondelete="SET NULL")
+    )
+
+
 class VideoUpload(UuidPrimaryKey, CreatedAt, Base):
     """A direct-to-storage upload in progress. The report's video is only replaced when the
     upload completes, so an abandoned upload never disturbs existing work."""
@@ -298,8 +341,8 @@ class MediaJob(UuidPrimaryKey, Timestamps, Base):
     __table_args__ = (
         _belongs_to("reports", "report_id"),
         CheckConstraint(
-            "kind IN ('process_video', 'stop_analysis', 'export_excel', 'export_pdf',"
-            " 'export_business')",
+            "kind IN ('process_video', 'stop_analysis', 'defect_detection', 'export_excel',"
+            " 'export_pdf', 'export_business')",
             name="kind",
         ),
         CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="status"),

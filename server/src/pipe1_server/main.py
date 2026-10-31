@@ -15,6 +15,7 @@ from pipe1_server.api import (
     jobs,
     projects,
     reports,
+    suggestions,
     taxonomy,
     videos,
 )
@@ -54,6 +55,7 @@ def create_app(settings_provider: Callable[[], Settings] = get_settings) -> Fast
     app.include_router(videos.router)
     app.include_router(defects.router)
     app.include_router(jobs.router)
+    app.include_router(suggestions.router)
     app.include_router(taxonomy.router)
     if settings_provider().storage_backend == "local":
         app.include_router(dev_storage.router)

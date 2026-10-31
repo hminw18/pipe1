@@ -16,7 +16,7 @@ from pipe1_core.defect_taxonomy import (
     grades_for_defect,
 )
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from pipe1_server.api.deps import (
     ClientIp,
@@ -30,7 +30,7 @@ from pipe1_server.api.reports import load_report
 from pipe1_server.db import after_commit
 from pipe1_server.ids import uuid7
 from pipe1_server.media import MAX_FRAME_BYTES, MediaError
-from pipe1_server.models.inspection import Report, ReportDefect, ReportVideo
+from pipe1_server.models.inspection import DefectSuggestion, Report, ReportDefect, ReportVideo
 from pipe1_server.services.reports import capture_key
 from pipe1_server.storage import IMAGE_URL_TTL
 
@@ -79,6 +79,8 @@ class DefectCreate(DefectFields):
     timestamp_ms: int = Field(ge=0)
     drive_direction: Direction
     frame_png_base64: str | None = FrameField
+    # The AI suggestion this defect confirms (api/suggestions.py).
+    suggestion_id: uuid.UUID | None = None
 
 
 class DefectOut(BaseModel):
@@ -254,8 +256,13 @@ def capture_defect(
     """Save the defect with the full-resolution frame at timestamp_ms: extracted server-side,
     or the frame the browser captured from the local file."""
     report, _, project = load_report(db, active.user, report_id, "edit", ip, user_agent)
-    fields = body.model_dump(exclude={"frame_png_base64"})
+    fields = body.model_dump(exclude={"frame_png_base64", "suggestion_id"})
     _validate_classification(fields)
+    suggestion = None
+    if body.suggestion_id is not None:
+        suggestion = db.get(DefectSuggestion, body.suggestion_id)
+        if suggestion is None or suggestion.report_id != report.id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "잘못된 AI 제안입니다.")
     video = _video_for_capture(db, report.id, body.frame_png_base64 is not None)
     if video.duration_seconds and body.timestamp_ms > video.duration_seconds * 1000:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "영상 길이를 벗어난 시점입니다.")
@@ -298,6 +305,8 @@ def capture_defect(
     except Exception:
         store.delete(key)
         raise
+    if suggestion is not None:
+        suggestion.status, suggestion.defect_id = "confirmed", defect.id
     db.refresh(defect)
     return defect_out(defect, store)
 
@@ -350,6 +359,12 @@ def delete_defect(
 ) -> Response:
     defect = _load_defect(db, active.user, defect_id, "edit", ip, user_agent)
     key, report_id = defect.image_object_key, defect.report_id
+    # The suggestion it confirmed is open again.
+    db.execute(
+        update(DefectSuggestion)
+        .where(DefectSuggestion.defect_id == defect.id)
+        .values(status="pending", defect_id=None)
+    )
     db.delete(defect)
     _touch(db, report_id)
     # Each defect owns its image (unique key), so deleting it never affects another defect.

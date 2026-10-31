@@ -469,6 +469,16 @@ Rules:
 - Timeline markers show captured defects. On the web a marker's height shows its grade (대 full, 중 two thirds, 소 one third); grades are never shown by colour.
 - Stop-segment markers may be shown separately when stop detection is used.
 
+### 6.3.1 AI Defect Suggestions (web)
+
+- `AI 분석` sends the processed video to the AI detector (shown only when one is configured). It finds defects across the whole video, including ones the operator did not stop for.
+- Each finding is a suggestion: a defect item, a confidence, and the time span it is visible, with a box per sampled frame when the model provides boxes. Suggestions are never part of the report until an inspector records them.
+- Open suggestions are drawn as boxes over the playing video (can be hidden), as spans under the timeline, and in an `AI 제안` list.
+- `적용` fills the defect form with the suggested item and jumps to its clearest frame; the inspector captures (C), corrects anything, and saves, which confirms the suggestion. `무시` rejects it; rejected suggestions can be shown and restored.
+- A suggestion stops being open when it is confirmed, rejected, or a defect of the same item is recorded within its span. Deleting the confirming defect reopens it.
+- A new analysis replaces the previous suggestions; replacing the video removes them. New report versions keep them.
+- AI suggestions use their own colour (amber) so they never read as recorded defects.
+
 ### 6.4 Defect Registration
 
 Workflow:
