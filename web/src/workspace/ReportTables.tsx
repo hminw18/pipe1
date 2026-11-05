@@ -126,6 +126,7 @@ export function PipeSection({ report }: { report: Report }) {
                     <AutoField
                       label={`${role === 'upstream' ? '상류' : '하류'} ${label}`}
                       value={report.manholes[role]?.[field] ?? null}
+                      options={taxonomy.data?.manhole_options[field]}
                       onSave={(value) => update(`/manholes/${role}`, { [field]: value })}
                     />
                   </td>

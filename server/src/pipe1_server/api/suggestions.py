@@ -47,6 +47,7 @@ class SuggestionOut(BaseModel):
     end_ms: int
     best_ms: int
     best_box: list[float] | None
+    distance_m: float | None
     boxes: list[BoxSampleOut]
     status: str
     defect_id: uuid.UUID | None
@@ -57,6 +58,10 @@ class SuggestionList(BaseModel):
     # False when no detector is configured: the UI hides the feature.
     available: bool
     suggestions: list[SuggestionOut]
+    # When the camera set off into the pipe (from stop analysis; None until it has run), and
+    # how many suggestions from before it are left out: the surface and the manhole.
+    travel_start_ms: int | None = None
+    before_travel: int = 0
 
 
 class SuggestionUpdate(BaseModel):
@@ -75,6 +80,7 @@ def suggestion_out(suggestion: DefectSuggestion) -> SuggestionOut:
         end_ms=suggestion.end_ms,
         best_ms=suggestion.best_ms,
         best_box=suggestion.best_box,
+        distance_m=suggestion.distance_m,
         boxes=[BoxSampleOut.model_validate(sample) for sample in boxes],
         status=suggestion.status,
         defect_id=suggestion.defect_id,
@@ -128,14 +134,28 @@ def list_suggestions(
     user_agent: UserAgent,
 ) -> SuggestionList:
     load_report(db, active.user, report_id, "view", ip, user_agent)
-    suggestions = db.scalars(
-        select(DefectSuggestion)
-        .where(DefectSuggestion.report_id == report_id)
-        .order_by(DefectSuggestion.start_ms, DefectSuggestion.id)
+    suggestions = list(
+        db.scalars(
+            select(DefectSuggestion)
+            .where(DefectSuggestion.report_id == report_id)
+            .order_by(DefectSuggestion.start_ms, DefectSuggestion.id)
+        )
     )
+    travel_start = db.scalar(
+        select(ReportVideo.travel_start_s).where(ReportVideo.report_id == report_id)
+    )
+    travel_start_ms = round(travel_start * 1000) if travel_start is not None else None
+    # Judged by the frame that shows it best; one already recorded as a defect always stays.
+    shown = [
+        s
+        for s in suggestions
+        if travel_start_ms is None or s.best_ms >= travel_start_ms or s.status == "confirmed"
+    ]
     return SuggestionList(
         available=build_detector(settings) is not None,
-        suggestions=[suggestion_out(s) for s in suggestions],
+        suggestions=[suggestion_out(s) for s in shown],
+        travel_start_ms=travel_start_ms,
+        before_travel=len(suggestions) - len(shown),
     )
 
 

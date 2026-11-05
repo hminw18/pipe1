@@ -9,6 +9,10 @@ The contract (the "Defect Detection API" requirements doc): POST /v1/jobs, then 
 GET /v1/jobs/{id} every 5 s for up to 3 hours (the worker accepts no callbacks). The GPU server
 is the user's own machine, so a brief outage while polling is tolerated. Its result is
 untrusted input, so it is validated and capped before anything is stored.
+
+API v2 ("Pipe1 Analysis API v2" doc; GET /healthz reports "api": 2): the job also takes the
+depth counter's region and the result adds `depth` (the stop analysis that otherwise runs in
+Pipe1's worker). Pipe1 sends the region only to a v2 server.
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ MAX_JOB_ID_LENGTH = 200
 MAX_TRACKS = 2000
 MAX_BOXES_PER_TRACK = 20000
 MAX_BOXES = 200_000
+MAX_STOPS = 2000
+MAX_CANDIDATES_PER_STOP = 3
+# One reading per second of video; 24 hours is far beyond any inspection video.
+MAX_READINGS = 86_400
 
 
 def _valid_box(box: list[float]) -> list[float]:
@@ -71,9 +79,41 @@ class Track(BaseModel):
     boxes: list[BoxSample] = Field(default_factory=list, max_length=MAX_BOXES_PER_TRACK)
 
 
+class StopCandidate(BaseModel):
+    t: float = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+
+
+class Stop(BaseModel):
+    start_s: float = Field(ge=0)
+    end_s: float = Field(ge=0)
+    distance_m: float | None = Field(default=None, ge=0)
+    candidates: list[StopCandidate] = Field(
+        default_factory=list, max_length=MAX_CANDIDATES_PER_STOP
+    )
+
+
+class Reading(BaseModel):
+    t: float = Field(ge=0)
+    m: float | None = Field(default=None, ge=0)
+
+
+class DepthResult(BaseModel):
+    """The depth counter read over the whole video: stops, when the camera set off into the
+    pipe, and the distance per second."""
+
+    version: str = Field(max_length=200)
+    travel_start_s: float | None = Field(default=None, ge=0)
+    readings: list[Reading] = Field(default_factory=list, max_length=MAX_READINGS)
+    stops: list[Stop] = Field(default_factory=list, max_length=MAX_STOPS)
+    error: str | None = Field(default=None, max_length=500)
+
+
 class DetectionResult(BaseModel):
     model_version: str = Field(max_length=200)
     tracks: list[Track] = Field(max_length=MAX_TRACKS)
+    # Present when the job was sent a depth region (API v2).
+    depth: DepthResult | None = None
 
     @model_validator(mode="after")
     def _bounded(self) -> DetectionResult:
@@ -99,7 +139,11 @@ class DetectorStatus:
 
 
 class DefectDetector(Protocol):
-    def submit(self, video_url: str) -> str: ...
+    def api_version(self) -> int:
+        """2 when the server also reads the depth counter (takes depth_roi), else 1."""
+        ...
+
+    def submit(self, video_url: str, depth_roi: tuple[int, int, int, int] | None = None) -> str: ...
 
     def poll(self, job_id: str) -> DetectorStatus: ...
 
@@ -160,11 +204,27 @@ def _rounded(box: list[float]) -> list[float]:
     return [round(value, 4) for value in box]
 
 
+# A reading counts for a moment at most this far from it (readings are 1 s apart).
+READING_REACH_SECONDS = 1.5
+
+
+def distance_at(readings: list[tuple[float, float | None]], seconds: float) -> float | None:
+    """The counter reading nearest to that moment, if one is close enough."""
+    known = [(abs(t - seconds), m) for t, m in readings if m is not None]
+    if not known:
+        return None
+    gap, metres = min(known, key=lambda item: item[0])
+    return round(metres, 2) if gap <= READING_REACH_SECONDS else None
+
+
 def suggestion_rows(
-    result: DetectionResult, duration_seconds: float | None
+    result: DetectionResult,
+    duration_seconds: float | None,
+    readings: list[tuple[float, float | None]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """DefectSuggestion column values for each track Pipe1 can record, and the number of
-    tracks dropped per unknown code. Times are clamped to the video."""
+    tracks dropped per unknown code. Times are clamped to the video; the distance is the depth
+    reading at the best frame."""
     rows: list[dict[str, Any]] = []
     skipped: dict[str, int] = {}
     for track in result.tracks:
@@ -192,6 +252,7 @@ def suggestion_rows(
                 "end_ms": _ms(end),
                 "best_ms": _ms(best),
                 "best_box": _rounded(best_box) if best_box else None,
+                "distance_m": distance_at(readings or [], best),
                 "boxes": [
                     {"t_ms": _ms(sample.t), "box": _rounded(sample.box), "score": sample.score}
                     for sample in boxes
@@ -220,10 +281,21 @@ class HttpDefectDetector:
         response.raise_for_status()
         return response
 
-    def submit(self, video_url: str) -> str:
-        response = self._request(
-            "POST", "/v1/jobs", json={"video_url": video_url, "sample_fps": SAMPLE_FPS}
-        )
+    def api_version(self) -> int:
+        try:
+            body = self._request("GET", "/healthz").json()
+        except (httpx2.HTTPError, ValueError):
+            # Unknown: v1 is the safe assumption (no depth_roi sent, Pipe1 analyses the stops).
+            return 1
+        value = body.get("api") if isinstance(body, dict) else None
+        return value if isinstance(value, int) else 1
+
+    def submit(self, video_url: str, depth_roi: tuple[int, int, int, int] | None = None) -> str:
+        body: dict[str, Any] = {"video_url": video_url, "sample_fps": SAMPLE_FPS}
+        if depth_roi is not None:
+            x, y, w, h = depth_roi
+            body["depth_roi"] = {"x": x, "y": y, "w": w, "h": h}
+        response = self._request("POST", "/v1/jobs", json=body)
         job_id = response.json().get("job_id")
         if not isinstance(job_id, str | int) or not 0 < len(str(job_id)) <= MAX_JOB_ID_LENGTH:
             raise DetectorError("detector returned no usable job_id")
@@ -254,12 +326,17 @@ class SampleDefectDetector:
     def __init__(self, path: Path) -> None:
         self._path = path
 
-    def submit(self, video_url: str) -> str:
+    def _result(self) -> DetectionResult:
+        return DetectionResult.model_validate_json(self._path.read_bytes())
+
+    def api_version(self) -> int:
+        return 2 if self._result().depth is not None else 1
+
+    def submit(self, video_url: str, depth_roi: tuple[int, int, int, int] | None = None) -> str:
         return "sample"
 
     def poll(self, job_id: str) -> DetectorStatus:
-        result = DetectionResult.model_validate_json(self._path.read_bytes())
-        return DetectorStatus("succeeded", result=result)
+        return DetectorStatus("succeeded", result=self._result())
 
 
 def build_detector(settings: Settings) -> DefectDetector | None:

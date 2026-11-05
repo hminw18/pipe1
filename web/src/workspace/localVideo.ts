@@ -58,6 +58,9 @@ export function useLocalVideo(reportId: string) {
       }
       await queryClient.invalidateQueries({ queryKey: keys.video(reportId) })
       await queryClient.invalidateQueries({ queryKey: keys.report(reportId) })
+      // A replacement ends the old video's analyses and drops its suggestions.
+      await queryClient.invalidateQueries({ queryKey: ['jobs', reportId] })
+      await queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
     },
     [queryClient, reportId],
   )

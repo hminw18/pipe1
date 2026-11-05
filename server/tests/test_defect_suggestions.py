@@ -84,7 +84,7 @@ def test_detection_is_off_without_a_detector(
 
     assert client.post(f"/api/reports/{report['id']}/defect-detection", json={}).status_code == 409
     listing = client.get(f"/api/reports/{report['id']}/suggestions").json()
-    assert listing == {"available": False, "suggestions": []}
+    assert (listing["available"], listing["suggestions"]) == (False, [])
 
 
 def test_tracks_become_suggestions_that_defects_confirm(ai: TestClient, tmp_path: Path) -> None:
@@ -151,6 +151,38 @@ def test_tracks_become_suggestions_that_defects_confirm(ai: TestClient, tmp_path
     assert statuses == ["pending", "pending"]
     upload(ai, report["id"], make_video(tmp_path / "w.avi"))
     assert ai.get(f"/api/reports/{report['id']}/suggestions").json()["suggestions"] == []
+
+
+def test_suggestions_from_before_the_camera_sets_off_are_hidden(
+    ai: TestClient, owner_engine: Engine, tmp_path: Path
+) -> None:
+    from sqlalchemy import text
+
+    report = _report(ai)
+    upload(ai, report["id"], make_video(tmp_path / "v.avi"))
+    _detect(ai, report["id"])
+    listing = ai.get(f"/api/reports/{report['id']}/suggestions").json()
+    assert (len(listing["suggestions"]), listing["travel_start_ms"]) == (2, None)
+
+    # Stop analysis found the camera setting off at 7 s: both best frames are before it.
+    with owner_engine.begin() as db:
+        db.execute(
+            text("UPDATE report_videos SET travel_start_s = 7.0 WHERE report_id = :id"),
+            {"id": report["id"]},
+        )
+    crack = listing["suggestions"][0]
+    ai.post(
+        f"/api/reports/{report['id']}/defects",
+        json={
+            "timestamp_ms": crack["best_ms"],
+            "drive_direction": "순주행",
+            "distance_m": 0.0,
+            "suggestion_id": crack["id"],
+        },
+    )
+    listing = ai.get(f"/api/reports/{report['id']}/suggestions").json()
+    assert [s["id"] for s in listing["suggestions"]] == [crack["id"]]  # recorded: kept
+    assert (listing["travel_start_ms"], listing["before_travel"]) == (7000, 1)
 
 
 def test_suggestion_from_another_report_is_refused(ai: TestClient, tmp_path: Path) -> None:

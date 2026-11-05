@@ -22,6 +22,8 @@ import { boxAt, isOpen } from './suggestions'
 type Segment = { start_time: number; end_time: number; candidates?: { time?: number; timestamp?: number }[] }
 
 const SPEEDS = [0.5, 1, 2]
+// Height of an AI box's label in pixels (11px text plus padding).
+const AI_LABEL_HEIGHT = 18
 
 function Uploader({
   label,
@@ -116,6 +118,9 @@ export const VideoPanel = forwardRef<
   const [videoSize, setVideoSize] = useState({ width: 0, height: 0 })
   const [elementDuration, setElementDuration] = useState(0)
   const [showBoxes, setShowBoxes] = useState(true)
+  // Jobs that ran on the video being replaced: hidden once a new file is chosen, unless its
+  // upload fails and the old video stays.
+  const [replacedJobIds, setReplacedJobIds] = useState<string[]>([])
   const info = video.data
   const ready = info?.transcode_status === 'ready'
   // The local file plays from the moment it is chosen; otherwise the processed copy.
@@ -181,17 +186,30 @@ export const VideoPanel = forwardRef<
     await queryClient.invalidateQueries({ queryKey: keys.video(reportId) })
   }
 
-  const latestJob = analysis.data?.[0]
+  const replaced = local && !local.error ? replacedJobIds : []
+  const current = (job: Schemas['JobOut'] | undefined) => (job && !replaced.includes(job.id) ? job : undefined)
+  const latestJob = current(analysis.data?.[0])
   const segments: Segment[] = (latestJob?.status === 'succeeded' && (latestJob.result?.segments as Segment[])) || []
-  const detectionJob = detection.data?.[0]
+  const detectionJob = current(detection.data?.[0])
   const detecting = detectionJob?.status === 'queued' || detectionJob?.status === 'running'
-  const openSuggestions = (suggestions.data?.suggestions ?? []).filter((s) => isOpen(s, defects))
+  // The server drops the old video's suggestions when the upload completes.
+  const openSuggestions = uploading ? [] : (suggestions.data?.suggestions ?? []).filter((s) => isOpen(s, defects))
+
+  function chooseFile(file: File) {
+    setReplacedJobIds([analysis.data?.[0]?.id, detection.data?.[0]?.id].filter((id): id is string => Boolean(id)))
+    onFile(file)
+  }
 
   // A finished detection run replaced the suggestions.
   const detectionStatus = detectionJob?.status
   useEffect(() => {
     if (detectionStatus === 'succeeded') void queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
   }, [detectionStatus, queryClient, reportId])
+  // Stop analysis finds when the camera set off; suggestions from before it are left out.
+  const analysisStatus = latestJob?.status
+  useEffect(() => {
+    if (analysisStatus === 'succeeded') void queryClient.invalidateQueries({ queryKey: keys.suggestions(reportId) })
+  }, [analysisStatus, queryClient, reportId])
 
   async function startJob(path: string, kind: 'stop_analysis' | 'defect_detection') {
     setError(null)
@@ -277,7 +295,7 @@ export const VideoPanel = forwardRef<
               label={!info ? '영상 등록' : info.transcode_status === 'failed' ? '영상 교체' : '영상 파일 선택'}
               replacing={false}
               busy={false}
-              onFile={onFile}
+              onFile={chooseFile}
             />
           )}
         </div>
@@ -370,8 +388,14 @@ export const VideoPanel = forwardRef<
                 stageSize,
                 intrinsic,
               )
+              // The label sits above the box; at the top of the frame it goes inside instead, and
+              // on the right half it hangs from the right edge, so it is never cut off.
+              const placement = [
+                rect.y < AI_LABEL_HEIGHT ? ' label-inside' : '',
+                rect.x + rect.w / 2 > stageSize.width / 2 ? ' label-right' : '',
+              ].join('')
               return (
-                <div key={suggestion.id} className="ai-box" ref={(node) => positionBox(node, rect)}>
+                <div key={suggestion.id} className={`ai-box${placement}`} ref={(node) => positionBox(node, rect)}>
                   <span>
                     {suggestion.code} {suggestion.defect_item} {Math.round(suggestion.confidence * 100)}%
                   </span>
@@ -540,7 +564,7 @@ export const VideoPanel = forwardRef<
                   AI 분석
                 </button>
               )}
-              <Uploader label="영상 교체" replacing={Boolean(info)} busy={uploading} onFile={onFile} />
+              <Uploader label="영상 교체" replacing={Boolean(info)} busy={uploading} onFile={chooseFile} />
             </>
           )}
         </div>

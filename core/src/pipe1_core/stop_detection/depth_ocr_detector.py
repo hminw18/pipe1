@@ -64,6 +64,8 @@ class DepthOcrStopDetectionConfig:
     max_missing_bridge_seconds: float = 3.0
     min_digit_score: float = 0.5
     min_digit_margin: float = 0.0
+    # How long the counter must stay away from its starting distance to count as setting off.
+    travel_confirm_seconds: float = 3.0
     # Read keyframes first and decode only where needed (requires the ffmpeg command).
     keyframe_first: bool = True
 
@@ -446,6 +448,11 @@ class DepthOcrStopSegmentDetector:
         self.matcher = matcher or default_depth_reader()
         self.logger = logging.getLogger(self.__class__.__name__)
         self.last_stats: dict[str, object] = {}
+        # Seconds into the video when the counter first moved for good, from the last analyze().
+        self.last_travel_start: float | None = None
+        # (seconds, metres or None when unreadable) per sample after cleaning, from the last
+        # analyze(): the distance at any moment of the video.
+        self.last_readings: list[tuple[float, float | None]] = []
 
     def analyze(
         self,
@@ -482,6 +489,10 @@ class DepthOcrStopSegmentDetector:
         if progress_callback is not None:
             progress_callback(1, 1, "거리 OCR 결과 정리")
         cleaned_values = self._clean_values(samples)
+        self.last_travel_start = self._travel_start(samples, cleaned_values)
+        self.last_readings = [
+            (float(sample.time), value) for sample, value in zip(samples, cleaned_values)
+        ]
         segments = self._extract_segments(samples, cleaned_values)
         segments = self._merge_same_distance_segments(segments)
 
@@ -758,6 +769,31 @@ class DepthOcrStopSegmentDetector:
                 idx += 1
 
         return cleaned
+
+    def _travel_start(
+        self, samples: list[DepthSample], values: list[float | None]
+    ) -> float | None:
+        """The last reading at the starting distance before the counter moves away from it
+        for at least travel_confirm_seconds: when the camera sets off into the pipe. Before
+        that it is still being set up (on the surface or in the manhole). None if the counter
+        never moves."""
+        readings = [(s.time, v) for s, v in zip(samples, values) if v is not None]
+        if not readings:
+            return None
+        # The median of the first readings, so one misread does not move the start.
+        start = float(np.median([value for _, value in readings[:3]]))
+        confirm = max(1, int(round(self.config.travel_confirm_seconds * self.config.fps)))
+        still = readings[0][0]
+        for index, (time_s, value) in enumerate(readings):
+            if self._within_stop_distance_tolerance(start, value):
+                still = time_s
+                continue
+            following = readings[index : index + confirm]
+            if len(following) == confirm and not any(
+                self._within_stop_distance_tolerance(start, later) for _, later in following
+            ):
+                return float(still)
+        return None
 
     def _extract_segments(
         self,

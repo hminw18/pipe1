@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { forwardRef, useImperativeHandle, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { ApiError, del, get, patch, post, type Schemas } from '../api/client'
 import { keys, useTaxonomy } from '../api/queries'
@@ -54,8 +55,15 @@ function numberOrNull(value: string): number | null {
 
 export const DefectPanel = forwardRef<
   DefectPanelApi,
-  { reportId: string; canEdit: boolean; hasRoi: boolean; player: React.RefObject<PlayerApi | null> }
->(function DefectPanel({ reportId, canEdit, hasRoi, player }, ref) {
+  {
+    reportId: string
+    canEdit: boolean
+    hasRoi: boolean
+    player: React.RefObject<PlayerApi | null>
+    // Where the AI suggestion list goes instead of inside this panel (temporary demo layout).
+    suggestionSlot?: HTMLElement | null
+  }
+>(function DefectPanel({ reportId, canEdit, hasRoi, player, suggestionSlot }, ref) {
   const taxonomy = useTaxonomy()
   const defects = useDefects(reportId)
   const suggestions = useSuggestions(reportId)
@@ -232,6 +240,20 @@ export const DefectPanel = forwardRef<
     for (const d of c.condition_items) if (d.code) codes.set(d.item, d.code)
   }
 
+  const suggestionTable = (
+    <SuggestionTable
+      suggestions={suggestions.data?.suggestions ?? []}
+      defects={defects.data ?? []}
+      canEdit={canEdit}
+      applied={draft.suggestion?.id ?? null}
+      showRejected={showRejected}
+      onToggleRejected={() => setShowRejected(!showRejected)}
+      onSeek={(ms) => player.current?.seekMs(ms)}
+      onApply={apply}
+      onStatus={(suggestion, status) => void setSuggestionStatus(suggestion, status)}
+    />
+  )
+
   return (
     <section className="ws-section">
       <header>
@@ -385,17 +407,7 @@ export const DefectPanel = forwardRef<
         </form>
       )}
 
-      <SuggestionTable
-        suggestions={suggestions.data?.suggestions ?? []}
-        defects={defects.data ?? []}
-        canEdit={canEdit}
-        applied={draft.suggestion?.id ?? null}
-        showRejected={showRejected}
-        onToggleRejected={() => setShowRejected(!showRejected)}
-        onSeek={(ms) => player.current?.seekMs(ms)}
-        onApply={apply}
-        onStatus={(suggestion, status) => void setSuggestionStatus(suggestion, status)}
-      />
+      {suggestionSlot ? createPortal(suggestionTable, suggestionSlot) : suggestionTable}
 
       <div className="tbl-wrap">
         <table className="defect-list">
@@ -517,7 +529,6 @@ function SuggestionTable({
         <h3>
           AI 제안 <span className="mono">{open.length}</span>
         </h3>
-        <span className="faint">모델 {suggestions[0].model_version} · 검토 후 등록한 것만 보고서에 들어갑니다</span>
         <span className="spacer" />
         {rejected.length > 0 && (
           <button className="link quiet" onClick={onToggleRejected}>

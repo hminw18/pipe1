@@ -13,6 +13,7 @@ from pipe1_core.defect_taxonomy import (
     defect_code,
     defect_definitions_for_category,
 )
+from pipe1_core.manhole_options import MANHOLE_OPTIONS
 from pydantic import BaseModel
 
 from pipe1_server.api.defects import Quadrant
@@ -46,6 +47,8 @@ class Taxonomy(BaseModel):
     quadrants: list[str]
     undriven_reasons: list[str]
     drive_directions: list[str]
+    # Choices per manhole field (manhole_type, internal_material, cover_material, ...).
+    manhole_options: dict[str, list[str]]
 
 
 @router.get("/taxonomy", response_model=Taxonomy)
@@ -74,4 +77,5 @@ def taxonomy(_: CurrentSession) -> Taxonomy:
         quadrants=list(get_args(Quadrant)),
         undriven_reasons=list(get_args(UndrivenReason)),
         drive_directions=["순주행", "역주행"],
+        manhole_options={field: list(options) for field, options in MANHOLE_OPTIONS.items()},
     )

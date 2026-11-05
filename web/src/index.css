@@ -701,6 +701,21 @@ th.actions-col {
 .ws-error {
   padding: 8px 24px 0;
 }
+/* Temporary for the demo recording: video and AI suggestions side by side. */
+.ws-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.ws-split > .ws-section {
+  padding-top: 20px;
+}
+/* As tall as the video beside it (contain: size keeps its rows from growing the grid);
+   a long list scrolls. */
+.ws-split > .ws-section + .ws-section {
+  padding-left: 0;
+  contain: size;
+  overflow-y: auto;
+}
 
 .export-bar {
   display: flex;
@@ -804,6 +819,20 @@ th.actions-col {
   color: #fff;
   font-size: 11px;
   white-space: nowrap;
+}
+.ai-box.label-inside span {
+  bottom: auto;
+  top: 0;
+}
+.ai-box.label-inside:not(.label-right) span {
+  left: 0;
+}
+.ai-box.label-right span {
+  left: auto;
+  right: -2px;
+}
+.ai-box.label-inside.label-right span {
+  right: 0;
 }
 .video-empty {
   border: 1px solid var(--rule);
@@ -919,6 +948,11 @@ th.actions-col {
   border-bottom: 1px solid var(--rule);
   flex-wrap: wrap;
 }
+/* When the bar is too narrow, whole items move to the next line instead of breaking inside. */
+.transport > * {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .transport button.mono,
 .transport select {
   font-family: var(--mono);
@@ -953,6 +987,8 @@ th.actions-col {
 }
 .transport .counts.toggle {
   display: inline-flex;
+  /* Labels stack their contents by default; checkbox, text and count share one line. */
+  flex-direction: row;
   align-items: center;
   gap: 4px;
   cursor: pointer;
@@ -1084,9 +1120,13 @@ progress::-moz-progress-bar {
 .suggestions-head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 4px 10px;
   padding-bottom: 6px;
   font-size: 12px;
+}
+.suggestions-head h3 {
+  white-space: nowrap;
 }
 .defect-thumb {
   width: 48px;
@@ -1205,6 +1245,13 @@ progress::-moz-progress-bar {
   .ws-section {
     padding-left: 16px;
     padding-right: 16px;
+  }
+  .ws-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ws-split > .ws-section + .ws-section {
+    padding-left: 16px;
+    contain: none;
   }
 }
 @media (max-width: 560px) {

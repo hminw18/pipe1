@@ -1966,8 +1966,15 @@ export interface components {
         SuggestionList: {
             /** Available */
             available: boolean;
+            /**
+             * Before Travel
+             * @default 0
+             */
+            before_travel: number;
             /** Suggestions */
             suggestions: components["schemas"]["SuggestionOut"][];
+            /** Travel Start Ms */
+            travel_start_ms?: number | null;
         };
         /** SuggestionOut */
         SuggestionOut: {
@@ -2034,6 +2041,10 @@ export interface components {
             drive_directions: string[];
             /** Grades */
             grades: string[];
+            /** Manhole Options */
+            manhole_options: {
+                [key: string]: string[];
+            };
             /** Quadrants */
             quadrants: string[];
             /** Undriven Reasons */

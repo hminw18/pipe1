@@ -1,6 +1,6 @@
 # Tests
 
-What each automated test protects, and why it exists. 212 Python test functions (148 server, 64 desktop/core) and 19 frontend tests.
+What each automated test protects, and why it exists. 215 Python test functions (150 server, 65 desktop/core) and 19 frontend tests.
 
 ## Running them
 
@@ -105,6 +105,7 @@ Tests that only echo configuration, check framework behaviour, duplicate another
 |---|---|
 | `test_new_report_has_both_manholes_and_survey_defaults` | New reports start with both manholes and survey defaults. |
 | `test_pipe_values_are_derived` | Undriven length and completion are calculated, not entered. |
+| `test_manhole_fields_with_choices_take_only_listed_values` | 맨홀종류, 내부재질, 뚜껑재질, 인버트 and 사다리모양 accept only their listed choices (served by `/api/taxonomy`) or blank; other manhole fields stay free text. |
 | `test_partial_updates_leave_other_fields_alone` | PATCH changes only the fields sent. |
 | `test_export_readiness` | Missing required fields are reported before export. |
 | `test_report_number_unique_per_business` | Report numbers are unique within a business. |
@@ -123,7 +124,7 @@ Uses real ffmpeg on small generated videos.
 | Test | Guarantees |
 |---|---|
 | `test_upload_process_and_play` | Upload → processing → playable MP4 (re-encode path, MJPEG source). |
-| `test_browser_playable_video_is_repackaged_not_reencoded` | H.264 sources are only repackaged (no re-encode) and come out seekable (index first). |
+| `test_browser_playable_mp4_is_played_as_uploaded` | An H.264 MP4 is played as uploaded: no re-encode and no rewrite of a multi-GB file. |
 | `test_capture_is_frame_accurate` | Server-side capture returns the frame at the requested time. |
 | `test_two_captures_at_same_time_have_separate_images` | Deleting one defect never deletes another's image. |
 | `test_capture_without_distance_or_roi_is_rejected_before_saving` | A defect needs a distance; a refused capture stores nothing. |
@@ -135,7 +136,7 @@ Uses real ffmpeg on small generated videos.
 | `test_tampered_or_oversized_upload_urls_are_refused` | Signed upload URLs cannot be redirected or overfilled. |
 | `test_exports` | Excel and PDF exports are produced as jobs. |
 | `test_comparison_requires_matching_reports` | Comparison PDFs need compatible reports. |
-| `test_stop_analysis_job` | Stop analysis needs a depth region and then runs. |
+| `test_stop_analysis_job` | Stop analysis needs a depth region and then runs; replacing the video ends analyses still running on the old one, hides their results and does not block a new run. |
 | `test_quota_is_enforced` | Organization storage quota blocks new uploads. |
 | `test_defects_can_be_captured_in_the_browser_while_uploading` | During upload, captures need a browser frame; that frame is stored, and the defect survives upload completion. |
 | `test_unusable_browser_frames_are_rejected` | Non-PNG, truncated, or huge-dimension frames are refused before decoding. |
@@ -149,6 +150,7 @@ A sample result file stands in for the GPU server.
 |---|---|
 | `test_detection_is_off_without_a_detector` | Without a configured detector the feature is hidden and cannot be started. |
 | `test_tracks_become_suggestions_that_defects_confirm` | Tracks map to Pipe1 defect items (pipe and manhole codes; unknown codes dropped), times are clamped to the video, the best box falls back to the nearest sample; rejecting works, recording a defect confirms (even with a corrected item), a confirmed suggestion cannot be rejected, new versions carry suggestions linked to their own defects, deleting the defect reopens it, a new run replaces suggestions and a new video removes them. |
+| `test_suggestions_from_before_the_camera_sets_off_are_hidden` | Once stop analysis has found when the camera set off into the pipe, suggestions whose best frame is before it are left out and counted; one already recorded as a defect stays. |
 | `test_suggestion_from_another_report_is_refused` | A defect cannot confirm another report's suggestion. |
 | `test_invalid_detector_output_fails_the_job` | Out-of-range detector output fails the job with a clear message and stores nothing. |
 | `test_http_detector_follows_the_contract` | The client sends the GPU server the contract's request and token, rides out a short outage while polling, fails on an error status, and keeps the 3-hour deadline from submission. |
@@ -215,7 +217,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 | File | Guarantees |
 |---|---|
 | `test_frame_candidate_detector.py` (2) | Candidate frames are found after motion bursts, at most the configured number per stop, and the result is plain JSON (an internal image signature once leaked into it, so the web app could not store the job result and the job hung at 99%). |
-| `test_depth_ocr_stop_detector.py` (4) | Digit slots of the depth counter are located (also with loose ROIs); depth series become stop segments with short gaps bridged; reading keyframes first finds exactly the stops that decoding every frame finds (including a short stop spanning a keyframe and an unreadable stretch), with far fewer frames decoded. |
+| `test_depth_ocr_stop_detector.py` (5) | Digit slots of the depth counter are located (also with loose ROIs); depth series become stop segments with short gaps bridged; the moment the camera sets off is the last reading at the starting distance, not fooled by a misread or by a counter that never moves; reading keyframes first finds exactly the stops that decoding every frame finds (including a short stop spanning a keyframe and an unreadable stretch), with far fewer frames decoded. |
 | `test_depth.py` (3) | Distance OCR is positive on a real report video, falls back to Tesseract, returns nothing when both fail. |
 | `test_video_capture.py` (1) | Opening a video falls back to the default backend when ffmpeg fails. |
 
@@ -265,7 +267,7 @@ The desktop app remains shippable until the web app reaches parity, but its test
 | `test_security_units.py`: password length bounds | Duplicate of `test_password_policy`. |
 | `test_accounts_api.py`: platform invitation role | Covered by `test_invited_platform_admin_must_enroll_mfa`. |
 | `test_worker_and_email.py`: unknown template, successful send, give-up after last retry, settings accepted | Trivial or implied by the remaining queue and error-classification tests. |
-| `test_media_pipeline.py`: probe reports playability | Covered by the repackaging test. |
+| `test_media_pipeline.py`: probe reports playability | Covered by the played-as-uploaded test. |
 | `test_media_pipeline.py`: depth ROI must fit | Minor input validation with no security or data impact. |
 | `test_inspection_api.py`: explicit visibility | Schema validation already enforced by the request model. |
 | `test_db.py`: old schema migrations (2), performance indexes, recreating a deleted workspace, Korea-time helper | No installed desktop users with old data exist; the rest checked implementation details. |

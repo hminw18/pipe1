@@ -82,6 +82,26 @@ def test_pipe_values_are_derived(owner_client) -> None:
     assert done["pipe_information"]["length_m"] == 100  # untouched by the partial update
 
 
+def test_manhole_fields_with_choices_take_only_listed_values(owner_client) -> None:
+    client, _ = owner_client
+    report = _report(client, _business(client, _project(client)["id"])["id"])
+    options = client.get("/api/taxonomy").json()["manhole_options"]
+    assert set(options) == {
+        "manhole_type",
+        "internal_material",
+        "cover_material",
+        "invert",
+        "ladder_shape",
+    }
+    url = f"/api/reports/{report['id']}/manholes/upstream"
+    chosen = {field: values[0] for field, values in options.items()}
+    updated = client.patch(url, json=chosen).json()
+    assert {f: updated["manholes"]["upstream"][f] for f in chosen} == chosen
+    assert client.patch(url, json={"cover_material": "나무"}).status_code == 422
+    assert client.patch(url, json={"cover_material": None}).status_code == 200
+    assert client.patch(url, json={"manhole_number": "아무 값"}).status_code == 200
+
+
 def test_partial_updates_leave_other_fields_alone(owner_client) -> None:
     client, _ = owner_client
     report = _report(client, _business(client, _project(client)["id"])["id"])

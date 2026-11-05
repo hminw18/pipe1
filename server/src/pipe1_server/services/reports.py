@@ -94,6 +94,7 @@ SUGGESTION_COPY_FIELDS = (
     "end_ms",
     "best_ms",
     "best_box",
+    "distance_m",
     "boxes",
     "status",
 )
@@ -237,6 +238,7 @@ def create_version_from_latest(
                 "depth_roi_y",
                 "depth_roi_w",
                 "depth_roi_h",
+                "travel_start_s",
             )
         },
     )

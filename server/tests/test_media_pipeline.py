@@ -267,7 +267,15 @@ def test_comparison_requires_matching_reports(client: TestClient, report: dict) 
     assert "report.inspector" in response.json()["detail"]["fields"]
 
 
-def test_stop_analysis_job(client: TestClient, report: dict, tmp_path: Path) -> None:
+def test_stop_analysis_job(
+    client: TestClient, report: dict, owner_engine: Engine, tmp_path: Path
+) -> None:
+    """Analysis runs on the processed video; replacing the video ends analyses still running
+    on the old one and hides its results."""
+    from sqlalchemy.orm import Session
+
+    from pipe1_server.models.inspection import MediaJob
+
     upload(client, report["id"], make_video(tmp_path / "v.avi"))
     no_roi = client.post(f"/api/reports/{report['id']}/stop-analysis", json={})
     assert no_roi.status_code == 409
@@ -280,6 +288,28 @@ def test_stop_analysis_job(client: TestClient, report: dict, tmp_path: Path) -> 
     job = client.get(f"/api/jobs/{started.json()['id']}").json()
     assert job["status"] == "succeeded", job
     assert isinstance(job["result"]["segments"], list)
+    assert job["result"]["travel_start_s"] is None  # the test video has no depth counter
+
+    with Session(owner_engine) as db, db.begin():
+        stuck = MediaJob(
+            project_id=report["project_id"],
+            report_id=report["id"],
+            kind="stop_analysis",
+            status="running",
+            created_by=db.execute(
+                text("SELECT id FROM users ORDER BY created_at DESC LIMIT 1")
+            ).scalar_one(),
+        )
+        db.add(stuck)
+        db.flush()
+        stuck_id = str(stuck.id)
+    upload(client, report["id"], make_video(tmp_path / "w.avi"))
+    assert client.get(f"/api/jobs/{stuck_id}").json()["status"] == "failed"
+    assert client.get(f"/api/reports/{report['id']}/jobs?kind=stop_analysis").json() == []
+    again = client.post(f"/api/reports/{report['id']}/stop-analysis", json={})
+    assert again.status_code == 202
+    listed = client.get(f"/api/reports/{report['id']}/jobs?kind=stop_analysis").json()
+    assert [j["id"] for j in listed] == [again.json()["id"]]
 
 
 def test_quota_is_enforced(app_engine, owner_engine: Engine, clock: Clock, tmp_path: Path) -> None:
@@ -321,19 +351,20 @@ def make_h264_video(tmp_path: Path) -> Path:
     return target
 
 
-def test_browser_playable_video_is_repackaged_not_reencoded(
+def test_browser_playable_mp4_is_played_as_uploaded(
     client: TestClient, report: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from pipe1_server import media
 
-    def no_transcode(*_: object) -> None:
-        raise AssertionError("H.264 sources must not be re-encoded")
+    def no_rewrite(*_: object) -> None:
+        raise AssertionError("a browser-playable MP4 must not be rewritten")
 
-    monkeypatch.setattr(media, "transcode_for_browser", no_transcode)
-    video = upload(client, report["id"], make_h264_video(tmp_path))
+    monkeypatch.setattr(media, "transcode_for_browser", no_rewrite)
+    monkeypatch.setattr(media, "remux_for_browser", no_rewrite)
+    source = make_h264_video(tmp_path)
+    video = upload(client, report["id"], source)
     assert video["transcode_status"] == "ready", video
-    playback = client.get(_path_and_query(video["playback_url"])).content
-    assert 0 < playback.find(b"moov") < playback.find(b"mdat")  # index first: seekable
+    assert client.get(_path_and_query(video["playback_url"])).content == source.read_bytes()
 
 
 def _png(width: int = 320, height: int = 240, value: int = 77) -> bytes:

@@ -221,6 +221,8 @@ Combined pipe/manhole table structure:
 | 하류맨홀* | `{manhole_number}` | `{manhole_type}` | `{internal_material}` | `{cover_material}` | `{el_m}` | `{size}` | `{depth_m}` | `{invert}` | `{ladder_shape}` | `{latitude}` | `{longitude}` |
 | 연장(m)* `{length_m}` |  |  | 총주행거리(m)* `{total_drive_distance_m}` |  |  | 완주여부 `{is_completed}` |  |  | 미주행거리(m) `{undriven_distance_m}` |  |  |
 
+맨홀종류, 맨홀 내부재질, 맨홀 뚜껑재질, 맨홀 인버트 and 사다리모양 are chosen from fixed lists (`pipe1_core.manhole_options`, e.g. `NM(표준 맨홀)`, `RC(철근 콘크리트)`, `주철`) or left blank; the other manhole fields are free text. A value saved before a field had choices is still shown until another is picked.
+
 ### 4.6 Actual Survey Information
 
 Actual Survey Information belongs to one Report and is displayed as a separate table inside the pipe-information area.
@@ -477,6 +479,7 @@ Rules:
 - `적용` fills the defect form with the suggested item and jumps to its clearest frame; the inspector captures (C), corrects anything, and saves, which confirms the suggestion. `무시` rejects it; rejected suggestions can be shown and restored.
 - A suggestion stops being open when it is confirmed, rejected, or a defect of the same item is recorded within its span. Deleting the confirming defect reopens it.
 - A new analysis replaces the previous suggestions; replacing the video removes them. New report versions keep them.
+- Suggestions from before the camera sets off into the pipe (surface, manhole) are left out: stop analysis reads when the depth counter first moves away from its starting distance (for at least 3 s), and suggestions whose clearest frame is earlier are hidden. Until stop analysis has run, all suggestions are shown. A suggestion already recorded as a defect always stays.
 - AI suggestions use their own colour (amber) so they never read as recorded defects.
 
 ### 6.4 Defect Registration

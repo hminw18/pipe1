@@ -31,6 +31,7 @@ export function ReportWorkspace() {
   const player = useRef<PlayerApi>(null)
   const defectPanel = useRef<DefectPanelApi>(null)
   const [error, setError] = useState<string | null>(null)
+  const [suggestionSlot, setSuggestionSlot] = useState<HTMLElement | null>(null)
   // Anyone who can open the report may edit it (view == edit in the permission matrix).
   const canEdit = Boolean(project.data)
 
@@ -131,14 +132,18 @@ export function ReportWorkspace() {
       {error && <p className="error ws-error">{error}</p>}
       <ReportInfoTable report={data} />
       <PipeSection report={data} />
-      <VideoPanel
-        ref={player}
-        reportId={reportId}
-        canEdit={canEdit}
-        defects={defects.data ?? []}
-        local={local}
-        onFile={(file) => void startLocal(file)}
-      />
+      {/* Temporary for the demo recording: video on the left half, AI suggestions on the right. */}
+      <div className="ws-split">
+        <VideoPanel
+          ref={player}
+          reportId={reportId}
+          canEdit={canEdit}
+          defects={defects.data ?? []}
+          local={local}
+          onFile={(file) => void startLocal(file)}
+        />
+        <section className="ws-section" ref={setSuggestionSlot} />
+      </div>
       <DefectPanel
         ref={defectPanel}
         reportId={reportId}
@@ -146,6 +151,7 @@ export function ReportWorkspace() {
         canEdit={canEdit && Boolean(video.data) && (Boolean(local) || video.data?.transcode_status === 'ready')}
         hasRoi={Boolean(video.data?.depth_roi)}
         player={player}
+        suggestionSlot={suggestionSlot}
       />
     </div>
   )

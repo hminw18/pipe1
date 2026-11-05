@@ -92,6 +92,23 @@ def test_depth_series_extracts_stop_segments_and_bridges_short_missing() -> None
         {"start_time": 0.0, "end_time": 6.0, "duration": 6.0, "distance_m": 0.0},
         {"start_time": 6.0, "end_time": 12.0, "duration": 6.0, "distance_m": 1.2},
     ]
+    # The camera sets off after the last reading at the starting distance.
+    assert detector._travel_start(samples, cleaned) == 5.0
+
+
+def test_travel_start_ignores_a_misread_and_a_counter_that_never_moves() -> None:
+    detector = DepthOcrStopSegmentDetector(DepthOcrStopDetectionConfig(fps=1.0))
+
+    def travel_start(values: list[float | None]) -> float | None:
+        samples = [
+            DepthSample(time=float(i), raw_value=v, value=v, min_score=None, min_margin=None)
+            for i, v in enumerate(values)
+        ]
+        return detector._travel_start(samples, values)
+
+    # Unreadable while being set up, one misread (8.8) at the start, sets off after 6 s.
+    assert travel_start([None, None, 0.0, 8.8, 0.0, 0.0, 0.0, 0.8, 1.6, 2.4, 3.2]) == 6.0
+    assert travel_start([0.0, 0.0, 0.1, 0.0, 0.2]) is None
 
 
 # Distance over time for a synthetic inspection: stops (one only 3.5 s long, spanning a
@@ -183,10 +200,12 @@ def test_keyframe_first_reading_finds_the_same_stops_with_less_decoding(tmp_path
     def detect(keyframe_first: bool):
         config = DepthOcrStopDetectionConfig(keyframe_first=keyframe_first)
         detector = DepthOcrStopSegmentDetector(config, matcher=_BrightnessCounter())
-        return detector.analyze(str(video), _ROI, max_workers=2), detector.last_stats
+        segments = detector.analyze(str(video), _ROI, max_workers=2)
+        readings = (detector.last_readings, detector.last_travel_start)
+        return segments, detector.last_stats, readings
 
-    every_frame, every_frame_stats = detect(keyframe_first=False)
-    fast, fast_stats = detect(keyframe_first=True)
+    every_frame, every_frame_stats, every_frame_readings = detect(keyframe_first=False)
+    fast, fast_stats, fast_readings = detect(keyframe_first=True)
 
     # The unreadable 3 s are bridged; the 3.5 s stop spans a keyframe.
     assert [(s["start_time"], s["end_time"], s["distance_m"]) for s in every_frame] == [
@@ -196,6 +215,12 @@ def test_keyframe_first_reading_finds_the_same_stops_with_less_decoding(tmp_path
         (31.0, 40.0, 11.0),
     ]
     assert fast == every_frame
+    # One cleaned reading per second, the gap bridged; the camera sets off after 6 s.
+    readings, travel_start = fast_readings
+    assert fast_readings == every_frame_readings
+    assert readings[:3] == [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]
+    assert len(readings) == 40 and all(value is not None for _, value in readings)
+    assert travel_start == 6.0
     assert fast_stats["mode"] == "keyframe_first"
     # Mostly movement, which is decoded; real inspections are mostly stopped.
     assert fast_stats["decoded_frames"] <= every_frame_stats["decoded_frames"] / 2

@@ -298,7 +298,8 @@ class JobRunner:
             # running forever.
             with self.session(user) as db:
                 job = db.get(MediaJob, job_id)
-                if job is not None:
+                # Not if it was ended meanwhile (its video was replaced).
+                if job is not None and job.status == "running":
                     job.status, job.progress, job.result = "succeeded", 100, result
                     job.message = None
         except Exception as error:  # noqa: BLE001 - every failure is recorded on the job
@@ -306,7 +307,7 @@ class JobRunner:
             message = str(error) if isinstance(error, UserFacingError) else GENERIC_FAILURE
             with self.session(user) as db:
                 job = db.get(MediaJob, job_id)
-                if job is not None:
+                if job is not None and job.status == "running":
                     job.status, job.error = "failed", message
 
     def _progress(self, user: User, job_id: uuid.UUID) -> Callable[[int, str], None]:
@@ -370,15 +371,22 @@ class JobRunner:
                 if still_used is None:
                     self._store.delete(original_key)
                 raise UserFacingError(INVALID_VIDEO) from error
-            playback = directory / "playback.mp4"
-            self._prepare_playback(source, playback, probe, progress)
-            playback_key = f"{group_prefix}video/{uuid.uuid4()}/playback.mp4"
-            self._store.upload_from(playback, playback_key, "video/mp4")
+            if probe.browser_playable and original_key.endswith(".mp4"):
+                # Browsers play it as uploaded (they fetch an index at the end with a range
+                # request), so the original doubles as the playback copy: no rewrite of a
+                # file that can be several GB.
+                playback_key = original_key
+            else:
+                playback = directory / "playback.mp4"
+                self._prepare_playback(source, playback, probe, progress)
+                playback_key = f"{group_prefix}video/{uuid.uuid4()}/playback.mp4"
+                self._store.upload_from(playback, playback_key, "video/mp4")
         with self.session(user) as db:
             video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
             if video is None or video.original_object_key != original_key:
                 # Replaced while processing; discard this output.
-                self._store.delete(playback_key)
+                if playback_key != original_key:
+                    self._store.delete(playback_key)
                 raise UserFacingError("처리 중 영상이 교체되었습니다.")
             video.playback_object_key = playback_key
             video.duration_seconds = probe.duration_seconds
@@ -431,7 +439,16 @@ class JobRunner:
                 progress(1, "영상 내려받는 중")
                 self._store.download_to(playback_key, path)
             result = run_stop_analysis(str(path), roi, progress=progress)
-        return {"segments": result.segments, "benchmark": result.benchmark}
+        with self.session(user) as db:
+            video = db.scalar(select(ReportVideo).where(ReportVideo.report_id == report_id))
+            if video is None or video.playback_object_key != playback_key:
+                raise UserFacingError("분석 중 영상이 교체되었습니다.")
+            video.travel_start_s = result.travel_start_s
+        return {
+            "segments": result.segments,
+            "travel_start_s": result.travel_start_s,
+            "benchmark": result.benchmark,
+        }
 
     # -- defect_detection ----------------------------------------------------------------
 

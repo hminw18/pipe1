@@ -227,6 +227,9 @@ class ReportVideo(UuidPrimaryKey, Timestamps, Base):
     depth_roi_w: Mapped[int | None]
     depth_roi_h: Mapped[int | None]
     processing_error: Mapped[str | None] = mapped_column(Text)
+    # When the camera set off into the pipe (the depth counter first moved), found by stop
+    # analysis; AI suggestions from before it are hidden.
+    travel_start_s: Mapped[float | None] = mapped_column(Float)
 
 
 class ReportDefect(UuidPrimaryKey, Timestamps, Base):
@@ -303,6 +306,8 @@ class DefectSuggestion(UuidPrimaryKey, CreatedAt, Base):
     best_ms: Mapped[int] = mapped_column(BigInteger)
     # [x1, y1, x2, y2] normalized to the frame; absent when the model reports time spans only.
     best_box: Mapped[list[float] | None] = mapped_column(JSONB)
+    # The depth counter at the best frame, when the counter was read (stop analysis).
+    distance_m: Mapped[float | None] = mapped_column(Float)
     # [{"t_ms": int, "box": [x1, y1, x2, y2], "score": float | None}, ...] in time order.
     boxes: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
     status: Mapped[str] = mapped_column(String(16), server_default="pending")

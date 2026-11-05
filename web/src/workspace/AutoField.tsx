@@ -47,10 +47,12 @@ export function AutoField({ value, onSave, type = 'text', options, required, lab
     title: error ?? undefined,
   }
   if (options) {
+    // A value saved before the field had choices stays visible until another is picked.
+    const choices = draft && !options.includes(draft) ? [draft, ...options] : options
     return (
       <select {...common} value={draft} onChange={(e) => { setDraft(e.target.value); void commit(e.target.value) }}>
         <option value="">-</option>
-        {options.map((option) => (
+        {choices.map((option) => (
           <option key={option} value={option}>
             {option}
           </option>

@@ -10,7 +10,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from pipe1_server.api.deps import (
     AppSettings,
@@ -42,6 +42,10 @@ CONTENT_TYPES = {
     ".mov": "video/quicktime",
     ".mp4": "video/mp4",
 }
+
+# Jobs whose results belong to one video; a replacement ends them and hides them.
+VIDEO_ANALYSIS_KINDS = ("stop_analysis", "defect_detection")
+VIDEO_REPLACED = "영상이 교체되어 중단되었습니다."
 
 
 class UploadRequest(BaseModel):
@@ -252,11 +256,23 @@ def complete_upload(
         replaced_keys = {k for k in (video.original_object_key, video.playback_object_key) if k}
         # AI suggestions point at times in the old video.
         db.execute(delete(DefectSuggestion).where(DefectSuggestion.report_id == report.id))
+        # Analyses of the old video still in progress end here, so they neither block nor
+        # report on the new one.
+        db.execute(
+            update(MediaJob)
+            .where(
+                MediaJob.report_id == report.id,
+                MediaJob.kind.in_(VIDEO_ANALYSIS_KINDS),
+                MediaJob.status.in_(("queued", "running")),
+            )
+            .values(status="failed", error=VIDEO_REPLACED)
+        )
         video.original_object_key = upload.object_key
         video.original_filename = upload.original_filename
         video.playback_object_key = None
         video.duration_seconds = video.fps = None
         video.width = video.height = None
+        video.travel_start_s = None
     video.size_bytes = size
     video.transcode_status = "pending"
     video.processing_error = None

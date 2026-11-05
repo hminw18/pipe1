@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Response, status
-from pydantic import BaseModel, Field
+from pipe1_core.manhole_options import MANHOLE_OPTIONS
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -109,6 +110,13 @@ class ManholeUpdate(BaseModel):
     ladder_shape: Text = Field(default=None, max_length=100)
     latitude: Text = Field(default=None, max_length=50)
     longitude: Text = Field(default=None, max_length=50)
+
+    @field_validator(*MANHOLE_OPTIONS)
+    @classmethod
+    def _one_of_the_choices(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is not None and value not in MANHOLE_OPTIONS[info.field_name or ""]:
+            raise ValueError("목록에 있는 값을 고르세요.")
+        return value
 
 
 class SurveyUpdate(BaseModel):

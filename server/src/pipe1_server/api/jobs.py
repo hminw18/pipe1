@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from pipe1_server.api.deps import (
     ClientIp,
@@ -20,6 +20,7 @@ from pipe1_server.api.deps import (
 )
 from pipe1_server.api.projects import load_business
 from pipe1_server.api.reports import load_report
+from pipe1_server.api.videos import VIDEO_ANALYSIS_KINDS
 from pipe1_server.db import after_commit
 from pipe1_server.models.inspection import MediaJob, Report, ReportGroup, ReportVideo
 from pipe1_server.security import audit
@@ -281,5 +282,14 @@ def list_report_jobs(
     query = select(MediaJob).where(MediaJob.report_id == report_id)
     if kind:
         query = query.where(MediaJob.kind == kind)
+    if kind in VIDEO_ANALYSIS_KINDS:
+        # Only analyses of the current video: those started after its upload was processed.
+        uploaded = db.scalar(
+            select(func.max(MediaJob.created_at)).where(
+                MediaJob.report_id == report_id, MediaJob.kind == "process_video"
+            )
+        )
+        if uploaded is not None:
+            query = query.where(MediaJob.created_at > uploaded)
     jobs = db.scalars(query.order_by(MediaJob.created_at.desc()).limit(20))
     return [job_out(job, store) for job in jobs]

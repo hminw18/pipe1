@@ -47,6 +47,10 @@ def default_worker_count() -> int:
 class StopAnalysisResult:
     segments: list[dict[str, object]]
     benchmark: dict[str, object] = field(default_factory=dict)
+    # When the camera set off into the pipe (the depth counter first moved), in seconds.
+    travel_start_s: float | None = None
+    # (seconds, metres or None when unreadable), one per second of video.
+    readings: list[tuple[float, float | None]] = field(default_factory=list)
 
 
 def analyze_candidate_segment(video_path: str, segment: dict[str, float]) -> dict[str, object]:
@@ -151,4 +155,6 @@ def run_stop_analysis(
     benchmark["candidate_error"] = candidate_error
     benchmark["total_seconds"] = time.perf_counter() - total_started
     report(100, "의심구간 분석 완료")
-    return StopAnalysisResult(analyzed, benchmark)
+    return StopAnalysisResult(
+        analyzed, benchmark, depth_detector.last_travel_start, depth_detector.last_readings
+    )
